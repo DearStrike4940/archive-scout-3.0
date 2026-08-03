@@ -9,7 +9,7 @@ One repository produces builds for Windows x64, Linux x64, and universal macOS f
 ## Downloads
 
 - [Download for Windows x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.1/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.1/ArchiveScout-Linux-x64.zip))
+- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.1/ArchiveScout-Linux-x64.zip)
 - [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.1/ArchiveScout-macOS-Universal.1.zip)
 
 ### macOS installation
