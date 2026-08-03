@@ -1,0 +1,426 @@
+from __future__ import annotations
+
+import os
+import shutil
+import ssl
+import subprocess
+import tempfile
+import threading
+import time
+import urllib.parse
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterable
+
+import httpx
+import urllib3
+
+from ..events import Stopped
+from ..runtime import ensure_frozen_bundle_available
+
+try:
+    import truststore
+except ImportError:  # pragma: no cover - exercised in minimal source installs
+    truststore = None
+
+
+class BackendUnavailable(RuntimeError):
+    pass
+
+
+class TransportExhaustedError(RuntimeError):
+    def __init__(self, url: str, failures: list[tuple[str, BaseException]]) -> None:
+        self.url = url
+        self.failures = failures
+        self.timed_out = any(is_transport_timeout(exc) for _, exc in failures)
+        summary = "; ".join(f"{name}: {type(exc).__name__}: {exc}" for name, exc in failures)
+        super().__init__(f"all network backends failed for {url}: {summary}")
+
+
+@dataclass(slots=True)
+class TransportResponse:
+    status: int
+    headers: dict[str, str]
+    final_url: str
+    data: bytes
+    backend: str
+    elapsed: float
+
+
+def is_transport_timeout(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    visited: set[int] = set()
+    timeout_types = (
+        TimeoutError,
+        httpx.TimeoutException,
+        urllib3.exceptions.TimeoutError,
+        urllib3.exceptions.ReadTimeoutError,
+        urllib3.exceptions.ConnectTimeoutError,
+    )
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, timeout_types):
+            return True
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, BaseException) and reason is not current:
+            current = reason
+            continue
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _ssl_context() -> ssl.SSLContext:
+    return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT) if truststore else ssl.create_default_context()
+
+
+def _read_limited(chunks: Iterable[bytes], max_bytes: int, stop_event: threading.Event) -> bytes:
+    data = bytearray()
+    for chunk in chunks:
+        if stop_event.is_set():
+            raise Stopped
+        if not chunk:
+            continue
+        data.extend(chunk)
+        if len(data) > max_bytes:
+            raise RuntimeError(f"response exceeds {max_bytes:,} bytes")
+    return bytes(data)
+
+
+class HttpxBackend:
+    name = "httpx"
+
+    def __init__(self, pool_size: int, connect_timeout: float, read_timeout: float, trust_env: bool = True) -> None:
+        self.connect_timeout = max(1.0, float(connect_timeout))
+        self.read_timeout = max(1.0, float(read_timeout))
+        self.client = httpx.Client(
+            verify=_ssl_context(),
+            follow_redirects=True,
+            max_redirects=10,
+            trust_env=bool(trust_env),
+            http2=False,
+            limits=httpx.Limits(
+                max_connections=max(2, int(pool_size)),
+                max_keepalive_connections=max(1, int(pool_size)),
+                keepalive_expiry=45.0,
+            ),
+            timeout=httpx.Timeout(
+                connect=self.connect_timeout,
+                read=self.read_timeout,
+                write=self.connect_timeout,
+                pool=max(5.0, self.connect_timeout),
+            ),
+        )
+
+    def close(self) -> None:
+        self.client.close()
+
+    def request(
+        self,
+        url: str,
+        headers: dict[str, str],
+        max_bytes: int,
+        stop_event: threading.Event,
+    ) -> TransportResponse:
+        ensure_frozen_bundle_available()
+        started = time.monotonic()
+        with self.client.stream("GET", url, headers=headers) as response:
+            announced = response.headers.get("Content-Length")
+            if announced and announced.isdigit() and int(announced) > max_bytes:
+                raise RuntimeError(f"response exceeds {max_bytes:,} bytes")
+            data = _read_limited(response.iter_bytes(1024 * 1024), max_bytes, stop_event)
+            return TransportResponse(
+                status=int(response.status_code),
+                headers={str(k): str(v) for k, v in response.headers.items()},
+                final_url=str(response.url),
+                data=data,
+                backend=self.name,
+                elapsed=time.monotonic() - started,
+            )
+
+
+class Urllib3Backend:
+    name = "urllib3"
+
+    def __init__(self, pool_size: int, connect_timeout: float, read_timeout: float) -> None:
+        self.timeout = urllib3.Timeout(connect=max(1.0, connect_timeout), read=max(1.0, read_timeout))
+        self.pool = urllib3.PoolManager(
+            num_pools=4,
+            maxsize=max(2, int(pool_size)),
+            block=True,
+            ssl_context=_ssl_context(),
+            retries=False,
+        )
+
+    def close(self) -> None:
+        self.pool.clear()
+
+    @staticmethod
+    def _discard(response) -> None:
+        if response is None:
+            return
+        try:
+            response.drain_conn()
+            response.release_conn()
+        except Exception:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    def request(
+        self,
+        url: str,
+        headers: dict[str, str],
+        max_bytes: int,
+        stop_event: threading.Event,
+    ) -> TransportResponse:
+        ensure_frozen_bundle_available()
+        started = time.monotonic()
+        current_url = url
+        response = None
+        try:
+            for _ in range(11):
+                response = self.pool.request(
+                    "GET",
+                    current_url,
+                    headers=headers,
+                    preload_content=False,
+                    redirect=False,
+                    retries=False,
+                    timeout=self.timeout,
+                )
+                if int(response.status) not in {301, 302, 303, 307, 308}:
+                    break
+                location = response.headers.get("Location")
+                if not location:
+                    break
+                self._discard(response)
+                response = None
+                current_url = urllib.parse.urljoin(current_url, location)
+            else:
+                raise RuntimeError(f"too many redirects: {url}")
+
+            assert response is not None
+            announced = response.headers.get("Content-Length")
+            if announced and str(announced).isdigit() and int(announced) > max_bytes:
+                raise RuntimeError(f"response exceeds {max_bytes:,} bytes")
+            data = _read_limited(response.stream(amt=1024 * 1024, decode_content=True), max_bytes, stop_event)
+            result = TransportResponse(
+                status=int(response.status),
+                headers={str(k): str(v) for k, v in response.headers.items()},
+                final_url=current_url,
+                data=data,
+                backend=self.name,
+                elapsed=time.monotonic() - started,
+            )
+            self._discard(response)
+            response = None
+            return result
+        finally:
+            if response is not None:
+                self._discard(response)
+
+
+class CurlBackend:
+    name = "curl"
+
+    def __init__(self, connect_timeout: float, read_timeout: float) -> None:
+        executable = shutil.which("curl")
+        if not executable:
+            raise BackendUnavailable("curl executable was not found")
+        self.executable = executable
+        self.connect_timeout = max(1.0, float(connect_timeout))
+        self.read_timeout = max(1.0, float(read_timeout))
+
+    def close(self) -> None:
+        return
+
+    @staticmethod
+    def _parse_headers(raw: str) -> dict[str, str]:
+        blocks = [block for block in raw.replace("\r\n", "\n").split("\n\n") if block.strip()]
+        block = blocks[-1] if blocks else raw
+        headers: dict[str, str] = {}
+        for line in block.splitlines()[1:]:
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            headers[key.strip()] = value.strip()
+        return headers
+
+    def request(
+        self,
+        url: str,
+        headers: dict[str, str],
+        max_bytes: int,
+        stop_event: threading.Event,
+    ) -> TransportResponse:
+        ensure_frozen_bundle_available()
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="archive-scout-curl-") as temp_dir:
+            header_path = Path(temp_dir) / "headers.txt"
+            body_path = Path(temp_dir) / "body.bin"
+            command = [
+                self.executable,
+                "--location",
+                "--compressed",
+                "--http1.1",
+                "--ipv4",
+                "--silent",
+                "--show-error",
+                "--connect-timeout",
+                str(int(self.connect_timeout)),
+                "--max-time",
+                str(int(self.connect_timeout + self.read_timeout)),
+                "--max-filesize",
+                str(int(max_bytes)),
+                "--dump-header",
+                str(header_path),
+                "--output",
+                str(body_path),
+                "--write-out",
+                "%{http_code}\n%{url_effective}",
+            ]
+            for key, value in headers.items():
+                command.extend(["--header", f"{key}: {value}"])
+            command.extend(["--", url])
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            proc = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=creationflags,
+            )
+            while proc.poll() is None:
+                if stop_event.wait(0.2):
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    raise Stopped
+            stdout, stderr = proc.communicate()
+            if proc.returncode != 0:
+                message = (stderr or stdout or f"curl exited {proc.returncode}").strip()
+                if proc.returncode == 28:
+                    raise TimeoutError(message)
+                raise OSError(message)
+            lines = stdout.splitlines()
+            status = int(lines[-2]) if len(lines) >= 2 and lines[-2].isdigit() else 0
+            final_url = lines[-1] if lines else url
+            data = body_path.read_bytes() if body_path.exists() else b""
+            if len(data) > max_bytes:
+                raise RuntimeError(f"response exceeds {max_bytes:,} bytes")
+            raw_headers = header_path.read_text(encoding="iso-8859-1", errors="replace") if header_path.exists() else ""
+            return TransportResponse(
+                status=status,
+                headers=self._parse_headers(raw_headers),
+                final_url=final_url,
+                data=data,
+                backend=self.name,
+                elapsed=time.monotonic() - started,
+            )
+
+
+class ResilientTransport:
+    """Persistent multi-backend HTTP transport.
+
+    Auto mode prefers httpx because it honors operating-system proxy settings,
+    falls back to urllib3 for a second independent Python stack, and finally uses
+    the operating system's curl implementation when available. Network failures
+    temporarily cool down only the failing backend; HTTP status responses are
+    returned to the caller so Wayback-specific retry policy remains centralized.
+    """
+
+    def __init__(
+        self,
+        *,
+        pool_size: int,
+        connect_timeout: float,
+        read_timeout: float,
+        mode: str = "auto",
+        trust_env: bool = True,
+        callback: Callable[[str], None] | None = None,
+    ) -> None:
+        requested = mode.strip().casefold() or "auto"
+        if requested not in {"auto", "httpx", "urllib3", "curl"}:
+            raise ValueError("network backend must be auto, httpx, urllib3, or curl")
+        self.callback = callback
+        self.lock = threading.Lock()
+        self.cooldown_until: dict[str, float] = {}
+        self.last_success: str | None = None
+        available: dict[str, object] = {
+            "httpx": HttpxBackend(pool_size, connect_timeout, read_timeout, trust_env=trust_env),
+            "urllib3": Urllib3Backend(pool_size, connect_timeout, read_timeout),
+        }
+        try:
+            available["curl"] = CurlBackend(connect_timeout, read_timeout)
+        except BackendUnavailable:
+            pass
+        if requested == "auto":
+            self.backends = available
+            self.order = [name for name in ("httpx", "urllib3", "curl") if name in available]
+        else:
+            if requested not in available:
+                raise BackendUnavailable(f"requested network backend is unavailable: {requested}")
+            self.backends = {requested: available[requested]}
+            self.order = [requested]
+            for name, backend in available.items():
+                if name != requested:
+                    backend.close()
+
+    @property
+    def backend_names(self) -> tuple[str, ...]:
+        return tuple(self.order)
+
+    def close(self) -> None:
+        for backend in self.backends.values():
+            backend.close()
+
+    def _ordered_names(self) -> list[str]:
+        now = time.monotonic()
+        with self.lock:
+            preferred = self.last_success
+            available = [name for name in self.order if self.cooldown_until.get(name, 0.0) <= now]
+        if not available:
+            # All backends are cooling down. Try all of them instead of blocking
+            # forever; the caller owns retry/backoff and can save progress.
+            available = list(self.order)
+        if preferred in available:
+            available.remove(preferred)
+            available.insert(0, preferred)
+        return available
+
+    def request(
+        self,
+        url: str,
+        headers: dict[str, str],
+        max_bytes: int,
+        stop_event: threading.Event,
+    ) -> TransportResponse:
+        failures: list[tuple[str, BaseException]] = []
+        for name in self._ordered_names():
+            if stop_event.is_set():
+                raise Stopped
+            backend = self.backends[name]
+            try:
+                response = backend.request(url, headers, max_bytes, stop_event)
+                with self.lock:
+                    changed = self.last_success != name
+                    self.last_success = name
+                    self.cooldown_until.pop(name, None)
+                if changed and self.callback:
+                    self.callback(f"Network backend: {name}")
+                return response
+            except Stopped:
+                raise
+            except RuntimeError as exc:
+                # Size limits and other deterministic local validation failures
+                # must not be retried using another backend.
+                if str(exc).startswith("response exceeds") or "too many redirects" in str(exc):
+                    raise
+                failures.append((name, exc))
+            except BaseException as exc:
+                failures.append((name, exc))
+            with self.lock:
+                self.cooldown_until[name] = time.monotonic() + 30.0
+            if self.callback:
+                self.callback(f"Network backend {name} failed; trying another connection method…")
+        raise TransportExhaustedError(url, failures)

@@ -1,0 +1,33 @@
+Archive Scout 3.0.0-beta.1 source validation
+
+Completed locally before packaging:
+- 70 unit, migration, and integration tests passed
+- the visual theme test passed under a virtual X display
+- python -m compileall completed for archive_scout and tests
+- the Tkinter interface instantiated successfully with all 11 pages
+- Simple mode displayed the intended five primary pages
+- both GitHub workflow YAML files parsed successfully
+- Linux and macOS build scripts passed shell syntax validation
+- schema version 2, 3, and 4 migration paths passed automated tests
+- multi-backend transport exhaustion was converted into a resumable transient failure
+- transport fallback and last-success backend preference passed automated tests
+- persistent Wayback unavailability produced a clean ConnectivityPaused state with the queue saved
+- page-based and resume-key CDX paths passed automated tests
+- configured CDX page-block size and HTTP 400 paging-to-resume fallback passed automated tests
+- combined direct-media extension indexing passed automated tests
+- backup, restore, repair, diagnostics, project merge, and full-text-index rebuilding passed automated tests
+- forum reconstruction, extraction, legacy embed recovery, duplicate clustering, snapshot comparison, provenance, and project merging passed automated tests
+- project.json round-trip testing preserved the Archive Scout 3.0 network recovery settings
+
+Not completed locally:
+- no live Internet Archive load or stress test was performed
+- no real corporate proxy, antivirus interception, or restrictive Windows firewall environment was available
+- the native Windows, Linux, and universal macOS packages were not built in this container
+
+Still required on GitHub and real machines:
+- Tests workflow on Windows, Linux, and macOS
+- Build All Platforms workflow
+- smoke test each packaged application
+- migration smoke test using backup copies of real schema 2, 3, and 4 projects
+- limited live Wayback indexing, download, media, and resume tests
+- Windows tests on at least one network that previously produced repeated CDX contact failures

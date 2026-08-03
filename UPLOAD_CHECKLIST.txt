@@ -1,0 +1,19 @@
+ARCHIVE SCOUT 3.0 BETA 1 UPLOAD CHECKLIST
+
+1. Create the new GitHub repository named Archive Scout 3.0.
+2. Extract archive-scout-3.0-beta1-repository.zip.
+3. Open the archive-scout-3.0-beta1 folder.
+4. Reveal hidden files with Command + Shift + . on macOS.
+5. Upload the CONTENTS of that folder to the new repository root.
+6. Confirm .github/workflows is present.
+7. Confirm requirements-runtime.txt and requirements-build.txt are at the root.
+8. Run the Tests workflow.
+9. Run Build All Platforms from the newest main commit.
+10. Smoke-test the generated Windows, Linux, and macOS packages.
+11. Test a Windows network that previously entered repeated CDX timeout/contact loops.
+12. Test Standard CDX, Timemap, and Automatic endpoint modes.
+13. Back up and open real schema 2, 3, and 4 projects to test schema version 5 migration.
+14. Test backup, restore, repair, diagnostics, resume, archive analysis, merge, and combined media indexing.
+15. Publish tag v3.0.0-beta.1.
+16. Confirm all three release downloads and checksum files are public.
+17. Test the README latest-release links while logged out.
