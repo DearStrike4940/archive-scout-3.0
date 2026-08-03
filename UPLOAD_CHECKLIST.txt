@@ -1,19 +1,17 @@
-ARCHIVE SCOUT 3.0 BETA 1 UPLOAD CHECKLIST
+ARCHIVE SCOUT 3.0 BETA 1.1 UPLOAD CHECKLIST
 
-1. Create the new GitHub repository named Archive Scout 3.0.
-2. Extract archive-scout-3.0-beta1-repository.zip.
-3. Open the archive-scout-3.0-beta1 folder.
+1. Back up the current Archive Scout 3.0 repository.
+2. Extract archive-scout-3.0-beta1.1-repository.zip.
+3. Open the archive-scout-3.0-beta1.1 folder.
 4. Reveal hidden files with Command + Shift + . on macOS.
-5. Upload the CONTENTS of that folder to the new repository root.
+5. Upload the CONTENTS of that folder to the repository root.
 6. Confirm .github/workflows is present.
-7. Confirm requirements-runtime.txt and requirements-build.txt are at the root.
-8. Run the Tests workflow.
-9. Run Build All Platforms from the newest main commit.
-10. Smoke-test the generated Windows, Linux, and macOS packages.
-11. Test a Windows network that previously entered repeated CDX timeout/contact loops.
-12. Test Standard CDX, Timemap, and Automatic endpoint modes.
-13. Back up and open real schema 2, 3, and 4 projects to test schema version 5 migration.
-14. Test backup, restore, repair, diagnostics, resume, archive analysis, merge, and combined media indexing.
-15. Publish tag v3.0.0-beta.1.
-16. Confirm all three release downloads and checksum files are public.
-17. Test the README latest-release links while logged out.
+7. Run the Tests workflow.
+8. Run Build All Platforms from the newest main commit.
+9. Smoke-test the generated Windows, Linux, and macOS packages.
+10. Reopen a copy of the project that produced malformed CDX JSON and resume indexing.
+11. Run Index media URLs only or Index and download selected media once; Beta 1.1 intentionally uses a new media query revision.
+12. Verify that media_captures contains pending or downloaded rows and that media reports are populated.
+13. Publish tag v3.0.0-beta.1.1.
+14. Confirm all six release assets are public.
+15. Test the README latest-release links while logged out.

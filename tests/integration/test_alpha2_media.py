@@ -9,7 +9,7 @@ from unittest.mock import patch
 from archive_scout.config import NetworkConfig, MediaConfig, ProjectConfig
 from archive_scout.database.connection import open_database
 from archive_scout.media.downloader import download_media
-from archive_scout.media.extensions import selected_extensions
+from archive_scout.media.extensions import allowed_media_url, extension_from_url, selected_extensions
 from archive_scout.media.indexer import index_media
 
 
@@ -17,6 +17,19 @@ class Alpha2MediaTests(unittest.TestCase):
     def test_extension_include_exclude(self):
         media = MediaConfig(include_extensions=["jpg", "gif", "mp4"], exclude_extensions=["gif"])
         self.assertEqual(selected_extensions(media), [".jpg", ".mp4"])
+
+    def test_historical_tracking_suffixes_and_extensionless_mime_are_media(self):
+        media = MediaConfig(include_extensions=["jpg", "wmv", "swf"], include_images=True, include_videos=True)
+        self.assertEqual(extension_from_url("http://example.com/photo.jpg&ref=thumb"), ".jpg")
+        self.assertEqual(extension_from_url("http://example.com/get?file=clip.wmv&x=1"), ".wmv")
+        self.assertEqual(extension_from_url("http://example.com/video.flv%3Fref=player"), ".flv")
+        self.assertTrue(allowed_media_url("http://example.com/photo.jpg&ref=thumb", media)[0])
+        allowed, kind, extension = allowed_media_url(
+            "http://example.com/player?id=7", media, "application/x-shockwave-flash"
+        )
+        self.assertTrue(allowed)
+        self.assertEqual(kind, "video")
+        self.assertEqual(extension, "")
 
     def test_mocked_media_index_and_download(self):
         with tempfile.TemporaryDirectory() as temp:

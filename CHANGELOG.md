@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.0.0-beta.1.1
+
+- Changed malformed or truncated HTTP 200 CDX JSON responses from fatal `RuntimeError` failures into resumable transient failures
+- Added an automatic same-endpoint fallback from JSON to uncompressed plain-text CDX output
+- Added robust line parsing with the original URL placed last, preserving historical URLs containing literal spaces
+- Added plain-text handling for resume keys and page-count responses
+- Corrected the combined media CDX filter from the unsupported `~original:` form to the documented `original:regex` form
+- Corrected explicit prefix, host, and domain media targets so wildcard suffixes are not sent literally alongside `matchType`
+- Expanded the combined media regex to accept malformed historical tracking suffixes such as `.jpg&ref=thumb`
+- Improved local media-extension detection for `&`, `;`, query-value, and other legacy URL forms
+- Added recognition of extensionless Flash, RealMedia, and Windows Media MIME types
+- Bumped the media-index state revision so projects with a previously completed but empty Beta 1 media index automatically receive a fresh media pass
+- Added six regression tests for malformed CDX recovery and legacy media URL handling
+- Expanded the automated suite to 76 tests
+
 ## 3.0.0-beta.1
 
 - Started the new Archive Scout 3.0 repository and combined the planned Alpha 4 reliability milestone with the planned Beta 1 interface redesign

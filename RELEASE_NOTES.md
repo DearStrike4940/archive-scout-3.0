@@ -1,36 +1,21 @@
-# Archive Scout 3.0 Beta 1
+# Archive Scout 3.0 Beta 1.1
 
-Archive Scout 3.0 Beta 1 combines the planned final Alpha 4 reliability milestone with the planned Beta 1 interface redesign in a new repository.
+Beta 1.1 is a focused reliability hotfix for the Archive Scout 3.0 Beta 1 release.
 
-## Highlights
+## Fixed
 
-- Rebuilt Wayback connection layer with httpx, urllib3, and operating-system curl fallback
-- Operating-system proxy and certificate-environment support
-- Standard CDX and timemap endpoint rotation
-- Page-based CDX retrieval for broad site searches
-- Resume-key retrieval and automatic paging fallback
-- Clean network pauses with the exact pending queue saved
-- Coordinated HTTP 429 waiting and one-probe recovery
-- One combined media-index stream for all selected image/video extensions
-- Database schema version 5
-- Crash recovery, backups, restore, repair, diagnostics, and operation history
-- Per-target network and indexing settings
-- New dashboard and left navigation
-- Simple and Advanced workspaces
-- System, Light, and Dark themes
-- Font scaling, persistent layout, keyboard shortcuts, and first-run guide
-- Paginated results and review-status coloring
-- Complete Alpha 3 archive-analysis feature set retained
+- Malformed or truncated CDX JSON returned with HTTP 200 no longer terminates indexing with `JSONDecodeError` or `RuntimeError`.
+- Archive Scout automatically retries the same CDX query as uncompressed plain text, including resume-key and page-count support.
+- If both formats are unusable, the request becomes resumable transient work and follows the existing endpoint rotation, date-window subdivision, and saved-queue recovery system.
+- Combined media indexing now uses the documented `filter=original:regex` syntax rather than `~original:`.
+- Explicit media targets correctly remove wildcard suffixes when `matchType=prefix`, `host`, or `domain` is selected.
+- Historical media URLs such as `photo.jpg&ref=thumb` and media filenames stored in query values are recognized locally.
+- Extensionless Flash, RealMedia, and Windows Media captures can be recognized from MIME type.
+- The media-index state revision was increased so an empty Beta 1 media index is not incorrectly treated as complete after the update.
 
-## Supported platforms
+## Required after upgrading
 
-- Windows x64
-- Linux x64
-- macOS Intel and Apple Silicon
-
-## Migration
-
-Archive Scout 3.0 can migrate schema versions 2, 3, and 4 to schema version 5. Back up important projects before opening them in the new release, then run the project-integrity check.
+Run **Index and download selected media** or **Index media URLs only** once. Beta 1.1 creates a new media-index state signature while preserving the existing capture signature, so it does not trust the old completed Beta 1 media state or duplicate valid media records.
 
 ## Release assets
 
@@ -42,7 +27,3 @@ ArchiveScout-Linux-x64.tar.gz.sha256
 ArchiveScout-macOS-Universal.zip
 ArchiveScout-macOS-Universal.zip.sha256
 ```
-
-## Testing note
-
-The source passed the complete local automated suite and virtual-display interface checks. Native packages, real proxy/firewall environments, and live Internet Archive stress behavior still require GitHub Actions and real-machine testing.

@@ -1,6 +1,6 @@
 # Archive Scout 3.0 Roadmap
 
-Archive Scout 3.0 begins with one combined milestone: the planned final Alpha 4 reliability pass and the planned Beta 1 visual redesign are delivered together as `3.0.0-beta.1` in the new Archive Scout 3.0 repository.
+Archive Scout 3.0 began with one combined milestone: the planned final Alpha 4 reliability pass and the planned Beta 1 visual redesign were delivered together as `3.0.0-beta.1` in the new Archive Scout 3.0 repository. Beta 1.1 is a focused live-testing hotfix for malformed CDX responses and combined media indexing.
 
 ## Completed foundation
 
@@ -31,6 +31,17 @@ Archive Scout 3.0 begins with one combined milestone: the planned final Alpha 4 
 - snapshot comparison
 - provenance research
 - project merging
+
+## Archive Scout 3.0 Beta 1.1 — CDX and media reliability hotfix
+
+Completed:
+
+- automatic malformed-JSON recovery through uncompressed line-oriented CDX fallback
+- resume-key and page-count parsing in the fallback format
+- corrected combined media field-filter syntax
+- corrected explicit media target normalization
+- legacy tracking-suffix and query-value media extension recognition
+- forced refresh of completed but empty Beta 1 media-index state
 
 ## Archive Scout 3.0 Beta 1 — Integration, reliability, and interface redesign
 

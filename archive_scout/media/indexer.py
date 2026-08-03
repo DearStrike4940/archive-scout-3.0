@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from ..cdx.client import HttpClient, RateLimitDeferred, TransientRequestError
 from ..cdx.indexer import PendingWindow, decode_plan, encode_plan, month_windows, split_window, window_label
-from ..cdx.parameters import cdx_endpoints, parse_cdx, parse_num_pages, preferred_index_strategy
+from ..cdx.parameters import cdx_endpoints, cdx_target_value, parse_cdx, parse_num_pages, preferred_index_strategy
 from ..config import ProjectConfig
 from ..database.repositories import get_or_create_media_target, record_error, upsert_media_capture, upsert_media_captures
 from ..downloads.rate_limit import FixedRateLimiter, SharedHostGate
@@ -44,6 +44,12 @@ def media_query_signature(config: ProjectConfig) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
+def media_index_state_signature(config: ProjectConfig) -> str:
+    payload = {"media_query_signature": media_query_signature(config), "index_revision": 2}
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
 def media_target_pattern(target: str, extension: str = "") -> str:
     return target if not extension else target.rstrip("*") + "*" + extension
 
@@ -53,7 +59,9 @@ def extension_filter_regex(extensions: list[str]) -> str:
     if not values:
         return r"(?!)"
     escaped = "|".join(re.escape(value) for value in values)
-    return rf"(?i)\.(?:{escaped})(?:[?#].*)?$"
+    # Historical sites frequently append broken tracking fragments such as
+    # image.jpg&ref=thumb without a question mark. Accept those separators too.
+    return rf"(?i).*\.(?:{escaped})(?:$|[?&#;].*)"
 
 
 def build_media_params(
@@ -66,8 +74,9 @@ def build_media_params(
     page_size: int | None = None,
     extensions: list[str] | None = None,
 ):
+    query_target = pattern if exact else cdx_target_value(pattern, config.cdx_match_type)
     params = [
-        ("url", pattern),
+        ("url", query_target),
         ("from", start),
         ("to", end),
         ("output", "json"),
@@ -82,7 +91,7 @@ def build_media_params(
     if not exact and extensions:
         # One regex filter covers every selected extension. Archive Scout never
         # performs an extension-by-extension CDX index.
-        params.append(("filter", "~original:" + extension_filter_regex(extensions)))
+        params.append(("filter", "original:" + extension_filter_regex(extensions)))
     params.extend(parse_cdx_parameter_lines(config.cdx_extra_params))
     params.extend([("limit", str(page_size or config.page_size)), ("showResumeKey", "true")])
     if resume:
@@ -279,6 +288,7 @@ def index_direct_media(
     stop_event: threading.Event,
     callback: Callable[[ProgressEvent], None] | None,
     signature: str,
+    state_signature: str,
 ) -> None:
     media = config.media.normalized()
     targets = media.targets or config.targets
@@ -302,7 +312,7 @@ def index_direct_media(
             SELECT resume_key,complete,seen,error_id FROM media_index_state
             WHERE target_id=? AND extension=? AND year=? AND query_signature=?
             """,
-            (target_id, ALL_EXTENSIONS_STATE, year, signature),
+            (target_id, ALL_EXTENSIONS_STATE, year, state_signature),
         ).fetchone()
         if state and state["complete"]:
             completed += len(default_windows)
@@ -316,7 +326,7 @@ def index_direct_media(
         while plan.pending:
             if stop_event.is_set():
                 with database:
-                    _save_media_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                    _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                 raise Stopped
             current = plan.pending[0]
             label = window_label(current.start, current.end)
@@ -338,7 +348,7 @@ def index_direct_media(
                         plan.completed += 1
                         completed += 1
                     complete = not plan.pending
-                    _save_media_state(database, target_id, year, signature, encode_plan(plan), complete, seen, None if complete else error_id)
+                    _save_media_state(database, target_id, year, state_signature, encode_plan(plan), complete, seen, None if complete else error_id)
                     if error_id:
                         database.execute("UPDATE errors SET resolved=1,last_seen=? WHERE id=?", (utc_now(), error_id))
                         error_id = None
@@ -346,7 +356,7 @@ def index_direct_media(
                     callback(ProgressEvent("media_index", f"{target} {label}: received {len(rows):,}, accepted {len(accepted):,}, stored {changed:,}", completed, total))
             except Stopped:
                 with database:
-                    _save_media_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                    _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                 raise
             except (RateLimitDeferred, TransientRequestError) as exc:
                 if current.strategy != "paged" and current.pagination_supported:
@@ -357,7 +367,7 @@ def index_direct_media(
                         plan.planned += added
                         total += added
                         with database:
-                            _save_media_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                            _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                         if callback:
                             callback(ProgressEvent("media_index", f"Combined media CDX timed out for {target} {label}; split into {len(parts)} smaller windows.", completed, total))
                         continue
@@ -366,11 +376,11 @@ def index_direct_media(
                     current.page_count = -1
                     current.resume_key = None
                     with database:
-                        _save_media_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                        _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                     if callback:
                         callback(ProgressEvent("media_index", f"Switching the combined media window to paged CDX indexing for {target} {label}.", completed, total))
                     continue
-                error_id = _defer_media_window(target_config, database, plan, current, target_id, year, signature, seen, error_id, target, label, exc, completed, total, stop_event, callback)
+                error_id = _defer_media_window(target_config, database, plan, current, target_id, year, state_signature, seen, error_id, target, label, exc, completed, total, stop_event, callback)
             except RuntimeError as exc:
                 if current.strategy == "paged" and ("HTTP 400" in str(exc) or "page-count" in str(exc)):
                     current.pagination_supported = False
@@ -378,14 +388,14 @@ def index_direct_media(
                     current.page = 0
                     current.page_count = -1
                     with database:
-                        _save_media_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                        _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                     continue
                 with database:
                     error_id = record_error(database, "media_index", "index_failure", f"{target} {label}: {type(exc).__name__}: {exc}", retryable=False)
-                    _save_media_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                    _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                 raise
             except Exception as exc:
-                error_id = _defer_media_window(target_config, database, plan, current, target_id, year, signature, seen, error_id, target, label, exc, completed, total, stop_event, callback)
+                error_id = _defer_media_window(target_config, database, plan, current, target_id, year, state_signature, seen, error_id, target, label, exc, completed, total, stop_event, callback)
 
 
 def index_embedded_media(
@@ -457,6 +467,7 @@ def index_media(
     if not selected_extensions(media):
         raise ValueError("no image or video extensions remain after include/exclude filtering")
     signature = media_query_signature(config)
+    state_signature = media_index_state_signature(config)
     limiter = FixedRateLimiter(config.cdx_delay)
     host_gate = SharedHostGate(config.rate_limit_base_pause, config.rate_limit_max_pause)
 
@@ -492,7 +503,7 @@ def index_media(
         network_callback=(lambda message: callback(ProgressEvent("network", message)) if callback else None),
     )
     try:
-        index_direct_media(config, database, client, stop_event, callback, signature)
+        index_direct_media(config, database, client, stop_event, callback, signature, state_signature)
         index_embedded_media(config, database, client, stop_event, callback, signature)
         _apply_snapshot_strategy(database, signature, media.snapshot_strategy)
         return signature

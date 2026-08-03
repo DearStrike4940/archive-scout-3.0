@@ -2,19 +2,28 @@
 
 Archive Scout is a cross-platform desktop research application for indexing public Wayback Machine captures, downloading archived pages and media, searching saved material, reconstructing forums, recovering legacy embeds, comparing snapshots, and reviewing large archive projects.
 
-Archive Scout 3.0 Beta 1 combines the planned final Alpha 4 integration and reliability work with the planned Beta 1 visual redesign. It uses database schema version 5 and can migrate projects created by earlier Archive Scout 2.0 releases.
+Archive Scout 3.0 Beta 1.1 is the first Beta 1 reliability hotfix. It preserves the Alpha 4/Beta 1 feature set while repairing malformed CDX response recovery and the combined media-index path. It uses database schema version 5 and can migrate projects created by earlier Archive Scout 2.0 releases.
 
 One repository produces builds for Windows x64, Linux x64, and universal macOS for Intel and Apple Silicon.
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.1/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.1/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.1/ArchiveScout-macOS-Universal.1.zip)
+- [Download for Windows x64](../../releases/latest/download/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](../../releases/latest/download/ArchiveScout-Linux-x64.tar.gz)
+- [Download for macOS Intel and Apple Silicon](../../releases/latest/download/ArchiveScout-macOS-Universal.zip)
 
 ### macOS installation
 
 Extract the ZIP, drag `Archive Scout.app` into `/Applications`, and launch the installed copy. Quit Archive Scout completely before replacing it with a newer release. Do not move, rename, delete, or overwrite the `.app` while it is running.
+
+## Beta 1.1 reliability hotfix
+
+Beta 1.1 repairs two issues found during live testing:
+
+- A successful HTTP 200 CDX response could contain incomplete or malformed JSON. Archive Scout now treats that as transient, retries the same query as uncompressed line-oriented CDX data, and only then rotates endpoints or subdivides the saved window. It no longer exposes a JSON decoder traceback as a permanent project failure.
+- The combined media filter used an invalid field prefix and could also send wildcard targets literally beside an explicit `matchType`. Beta 1.1 uses the documented `original:regex` filter form, normalizes explicit media targets, recognizes legacy `&ref=` URL suffixes, and reruns media indexing under a new media-index state revision.
+
+The media pass remains combined: it does not create one CDX index per extension. After updating from Beta 1, run **Index and download selected media** or **Index media URLs only** once so the corrected media-index state revision is used.
 
 ## What changed in Archive Scout 3.0 Beta 1
 
@@ -366,6 +375,6 @@ Each package has a corresponding `.sha256` file.
 
 ## Release status
 
-`3.0.0-beta.1` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
+`3.0.0-beta.1.1` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
 
 See [CHANGELOG.md](CHANGELOG.md), [ROADMAP.md](ROADMAP.md), and [SOURCE_VALIDATION.txt](SOURCE_VALIDATION.txt).

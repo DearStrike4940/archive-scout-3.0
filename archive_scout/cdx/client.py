@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import threading
 import time
 import urllib.parse
@@ -35,6 +36,10 @@ class TransientRequestError(RuntimeError):
         self.timed_out = timed_out
         self.splittable = splittable
         self.endpoint = endpoint
+
+
+class MalformedCDXResponse(TransientRequestError):
+    """A successful CDX response whose body cannot be parsed safely."""
 
 
 class RateLimitDeferred(TransientRequestError):
@@ -251,12 +256,32 @@ class HttpClient:
             try:
                 response = self.get(full_url, max_bytes, "application/json,text/plain,*/*")
                 return parse_json_response(response["data"], endpoint)
+            except MalformedCDXResponse as json_exc:
+                if self.retry_callback:
+                    self.retry_callback(
+                        1,
+                        1,
+                        "CDX JSON was incomplete or malformed; retrying the same result as uncompressed line data",
+                        0.0,
+                    )
+                fallback_params = cdx_text_fallback_params(params)
+                fallback_url = endpoint + "?" + urllib.parse.urlencode(fallback_params, doseq=True)
+                try:
+                    response = self.get(fallback_url, max_bytes, "text/plain,*/*")
+                    return parse_cdx_text_response(response["data"], endpoint, fallback_params)
+                except (TransientRequestError, RuntimeError) as fallback_exc:
+                    combined = MalformedCDXResponse(
+                        f"CDX JSON and plain-text fallback were both unusable at {endpoint}: "
+                        f"JSON: {json_exc}; text: {fallback_exc}",
+                        splittable=True,
+                        endpoint=endpoint,
+                    )
+                    failures.append((endpoint, combined))
             except TransientRequestError as exc:
                 exc.endpoint = endpoint
                 failures.append((endpoint, exc))
-                if self.retry_callback and len(endpoints) > 1:
-                    self.retry_callback(1, len(endpoints), f"Endpoint unavailable: {endpoint}; trying alternate CDX service", 0.0)
-                continue
+            if self.retry_callback and len(endpoints) > 1:
+                self.retry_callback(1, len(endpoints), f"Endpoint unavailable: {endpoint}; trying alternate CDX service", 0.0)
         timed_out = any(exc.timed_out for _, exc in failures)
         splittable = any(exc.splittable for _, exc in failures)
         summary = "; ".join(f"{endpoint}: {exc}" for endpoint, exc in failures)
@@ -277,32 +302,100 @@ class HttpClient:
 
 
 def parse_json_response(data: bytes, endpoint: str = "") -> object:
-    raw = data.decode("utf-8", "replace").strip()
+    raw = data.decode("utf-8", "replace").lstrip("\ufeff").strip()
     if not raw:
         return []
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        preview = clean_space(raw[:500])
-        lowered = preview.casefold()
-        transient_markers = (
-            "gateway",
-            "temporarily unavailable",
-            "timeout",
-            "server error",
-            "rate limit",
-            "too many requests",
-            "<html",
-            "upstream",
-        )
-        if any(marker in lowered for marker in transient_markers):
-            raise TransientRequestError(
-                f"CDX returned transient non-JSON content from {endpoint}: {preview}",
-                splittable=True,
-                endpoint=endpoint,
-            ) from exc
-        raise RuntimeError(f"CDX returned non-JSON content from {endpoint}: {preview}") from exc
+        around = raw[max(0, exc.pos - 160): exc.pos + 160]
+        preview = clean_space(around or raw[:320])
+        raise MalformedCDXResponse(
+            f"CDX returned malformed JSON from {endpoint} at line {exc.lineno}, "
+            f"column {exc.colno}: {preview}",
+            splittable=True,
+            endpoint=endpoint,
+        ) from exc
 
+
+def cdx_text_fallback_params(params: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Reissue a CDX query in a line-oriented format that survives bad JSON rows."""
+    cleaned = [
+        (key, value)
+        for key, value in params
+        if key.casefold() not in {"output", "fl", "gzip"}
+    ]
+    cleaned.append(("output", "txt"))
+    cleaned.append(("gzip", "false"))
+    if not any(key.casefold() == "shownumpages" and value.casefold() == "true" for key, value in params):
+        # Keeping original last makes split(maxsplit=5) safe even for malformed
+        # historical URLs containing literal spaces.
+        cleaned.append(("fl", "timestamp,mimetype,statuscode,digest,length,original"))
+    return cleaned
+
+
+def parse_cdx_text_response(
+    data: bytes,
+    endpoint: str = "",
+    params: list[tuple[str, str]] | None = None,
+) -> object:
+    raw = data.decode("utf-8", "replace").lstrip("\ufeff").replace("\x00", "").strip()
+    if not raw:
+        raise MalformedCDXResponse(
+            f"CDX plain-text fallback returned an empty body from {endpoint}",
+            splittable=True,
+            endpoint=endpoint,
+        )
+    lowered = raw[:1000].casefold()
+    if any(marker in lowered for marker in ("<!doctype", "<html", "bad gateway", "temporarily unavailable", "too many requests")):
+        raise MalformedCDXResponse(
+            f"CDX plain-text fallback returned an error page from {endpoint}: {clean_space(raw[:320])}",
+            splittable=True,
+            endpoint=endpoint,
+        )
+    params = params or []
+    if any(key.casefold() == "shownumpages" and value.casefold() == "true" for key, value in params):
+        token = next((line.strip() for line in raw.splitlines() if line.strip()), "")
+        if token.isdigit():
+            return int(token)
+        raise MalformedCDXResponse(
+            f"CDX page-count fallback was not numeric at {endpoint}: {clean_space(raw[:320])}",
+            splittable=True,
+            endpoint=endpoint,
+        )
+
+    fields = ["timestamp", "mimetype", "statuscode", "digest", "length", "original"]
+    blocks = re.split(r"\r?\n[ \t]*\r?\n", raw)
+    resume_key: str | None = None
+    row_text = raw
+    if len(blocks) > 1:
+        candidate = blocks[-1].strip()
+        if candidate and "\n" not in candidate and len(candidate.split()) == 1:
+            resume_key = candidate
+            row_text = "\n\n".join(blocks[:-1]).strip()
+
+    rows: list[list[str]] = []
+    malformed: list[str] = []
+    for line in row_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, len(fields) - 1)
+        if len(parts) != len(fields) or not parts[0].isdigit():
+            malformed.append(line)
+            continue
+        rows.append(parts)
+    if malformed:
+        raise MalformedCDXResponse(
+            f"CDX plain-text fallback contained {len(malformed)} malformed row(s) at {endpoint}: "
+            f"{clean_space(malformed[0][:320])}",
+            splittable=True,
+            endpoint=endpoint,
+        )
+    payload: list[object] = [fields, *rows]
+    if resume_key:
+        payload.extend([[], [resume_key]])
+    return payload
 
 def parse_retry_after(value: str | None) -> float | None:
     if not value:

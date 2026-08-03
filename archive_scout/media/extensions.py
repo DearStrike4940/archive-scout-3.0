@@ -1,15 +1,31 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from ..config import MediaConfig, normalize_extension
 from ..constants import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 
+MEDIA_SUFFIX_PATTERN = re.compile(r"(?i)(\.[a-z0-9]{1,10})(?=$|[?&#;])")
+
+
 def extension_from_url(url: str) -> str:
     try:
-        return Path(urlsplit(url).path).suffix.casefold()
+        parsed = urlsplit(url)
+        path = unquote(parsed.path or "")
+        suffix = Path(path).suffix.casefold()
+        if suffix and re.fullmatch(r"\.[a-z0-9]{1,10}", suffix, re.IGNORECASE):
+            return suffix
+        # Some archived URLs contain tracking data attached with '&' or ';'
+        # directly to the path, so pathlib sees '.jpg&ref=...' as the suffix.
+        matches = list(MEDIA_SUFFIX_PATTERN.finditer(path))
+        if matches:
+            return matches[-1].group(1).casefold()
+        # Media can also be passed as a query value, for example file=clip.wmv.
+        matches = list(MEDIA_SUFFIX_PATTERN.finditer(unquote(parsed.query)))
+        return matches[-1].group(1).casefold() if matches else ""
     except Exception:
         return ""
 
@@ -19,7 +35,12 @@ def media_kind(extension: str, mimetype: str = "") -> str | None:
     mime = (mimetype or "").split(";", 1)[0].casefold()
     if extension in IMAGE_EXTENSIONS or mime.startswith("image/"):
         return "image"
-    if extension in VIDEO_EXTENSIONS or mime.startswith("video/"):
+    if extension in VIDEO_EXTENSIONS or mime.startswith("video/") or mime in {
+        "application/x-shockwave-flash",
+        "application/futuresplash",
+        "application/vnd.rn-realmedia",
+        "application/x-mplayer2",
+    }:
         return "video"
     return None
 
