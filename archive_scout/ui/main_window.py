@@ -42,6 +42,7 @@ from ..reports.text import generate_reports
 from ..runtime import FrozenBundleError, ensure_frozen_bundle_available
 from ..scanning.full_text import search_documents
 from ..projects.backups import list_project_backups, restore_project_backup
+from .dashboard import read_dashboard_counts
 from .theme import REVIEW_COLORS, apply_text_theme, apply_theme
 from .widgets import ToolTip
 
@@ -123,13 +124,16 @@ class ArchiveScoutApp(tk.Tk):
         self.page_names: list[str] = []
         self.result_page = 0
         self.result_page_size = 500
+        self.dashboard_refresh_job: str | None = None
         self.create_variables()
         self.resolved_theme, self.colors = apply_theme(self, self.theme_var.get(), float(self.font_scale_var.get()))
         self.create_ui()
         first_run = not self.state_path().exists()
         self.load_app_state()
         self.apply_interface_theme()
+        self.output_var.trace_add("write", lambda *_args: self.after_idle(self.refresh_dashboard))
         self.after(100, self.process_events)
+        self.dashboard_refresh_job = self.after(250, self.dashboard_refresh_loop)
         if first_run:
             self.after(450, self.show_welcome)
 
@@ -402,23 +406,31 @@ class ArchiveScoutApp(tk.Tk):
         ttk.Label(frame, text="The Simple workspace keeps the common workflow visible. Advanced mode exposes CDX, media, analysis, network, review, repair, and migration controls. Archive Scout saves its indexing queue continuously and can switch between multiple HTTP connection methods when one stack cannot reach the Internet Archive.", wraplength=550, justify="left").pack(anchor="w")
         ttk.Button(frame, text="Open the dashboard", style="Accent.TButton", command=dialog.destroy).pack(anchor="e", pady=(24, 0))
 
+    def dashboard_refresh_loop(self) -> None:
+        try:
+            selected = self.notebook.tab(self.notebook.select(), "text") if self.notebook.select() else ""
+            active = bool(self.worker_thread and self.worker_thread.is_alive())
+            if active or selected == "Dashboard":
+                self.refresh_dashboard()
+            interval = 1000 if active else (1500 if selected == "Dashboard" else 5000)
+            self.dashboard_refresh_job = self.after(interval, self.dashboard_refresh_loop)
+        except tk.TclError:
+            self.dashboard_refresh_job = None
+
     def refresh_dashboard(self) -> None:
         root = Path(self.output_var.get()).expanduser()
         self.dashboard_project_var.set(str(root))
-        database_path = root / "archive_scout.sqlite3"
-        if not database_path.exists():
-            for variable in (self.dashboard_captures_var, self.dashboard_documents_var, self.dashboard_matches_var, self.dashboard_errors_var):
-                variable.set("0")
-            return
         try:
-            database = self.project_database()
-            self.dashboard_captures_var.set(f"{database.execute('SELECT COUNT(*) FROM captures').fetchone()[0]:,}")
-            self.dashboard_documents_var.set(f"{database.execute('SELECT COUNT(*) FROM documents').fetchone()[0]:,}")
-            self.dashboard_matches_var.set(f"{database.execute('SELECT COUNT(*) FROM document_matches').fetchone()[0]:,}")
-            self.dashboard_errors_var.set(f"{database.execute('SELECT COUNT(*) FROM errors WHERE resolved=0 AND ignored=0').fetchone()[0]:,}")
-            database.close()
+            counts = read_dashboard_counts(root / "archive_scout.sqlite3")
+            self.dashboard_captures_var.set(f"{counts['captures']:,}")
+            self.dashboard_documents_var.set(f"{counts['documents']:,}")
+            self.dashboard_matches_var.set(f"{counts['matches']:,}")
+            self.dashboard_errors_var.set(f"{counts['errors']:,}")
         except Exception as exc:
-            self.dashboard_project_var.set(f"{root} — {exc}")
+            # A writer can briefly own the SQLite lock during a batch commit. Keep
+            # the last good numbers and silently try again on the next live tick.
+            if not (self.worker_thread and self.worker_thread.is_alive()):
+                self.dashboard_project_var.set(f"{root} — {exc}")
 
     def restore_backup_ui(self) -> None:
         root = Path(self.output_var.get()).expanduser()
@@ -702,7 +714,7 @@ class ArchiveScoutApp(tk.Tk):
 
         ttk.Label(tab, text="Network recovery", style="Section.TLabel").grid(row=0, column=2, columnspan=2, sticky="w", pady=(0, 6))
         network_rows = [
-            ("Connection backend", self.network_backend_var, ("auto", "httpx", "urllib3", "curl")),
+            ("Connection backend", self.network_backend_var, (("auto", "httpx", "urllib3") if os.name == "nt" else ("auto", "httpx", "urllib3", "curl"))),
             ("CDX endpoint", self.network_endpoint_var, ("auto", "cdx", "timemap")),
             ("Index strategy", self.network_strategy_var, ("auto", "paged", "resume")),
         ]
@@ -1570,7 +1582,7 @@ class ArchiveScoutApp(tk.Tk):
         self.rate_limit_max_var.set(str(config.rate_limit_max_pause))
         self.rate_limit_wait_var.set(str(config.rate_limit_max_wait / 60.0))
         network = config.network.normalized()
-        self.network_backend_var.set(network.backend)
+        self.network_backend_var.set("auto" if os.name == "nt" and network.backend == "curl" else network.backend)
         self.network_endpoint_var.set(network.endpoint_mode)
         self.network_strategy_var.set(network.index_strategy)
         self.network_page_blocks_var.set(str(network.page_blocks))
@@ -1666,6 +1678,12 @@ class ArchiveScoutApp(tk.Tk):
             if not messagebox.askyesno(APP_NAME, "A run is active. Stop it and close the application?"):
                 return
             self.stop_event.set()
+        if self.dashboard_refresh_job is not None:
+            try:
+                self.after_cancel(self.dashboard_refresh_job)
+            except tk.TclError:
+                pass
+            self.dashboard_refresh_job = None
         self.save_app_state()
         self.destroy()
 

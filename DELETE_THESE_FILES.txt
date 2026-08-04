@@ -1,0 +1,8 @@
+Delete these obsolete Windows installer files from an existing Beta 1.2.1 repository before building Beta 1.3:
+
+packaging/windows/Install Archive Scout.cmd
+packaging/windows/Uninstall Archive Scout.cmd
+packaging/windows/install.ps1
+packaging/windows/uninstall.ps1
+
+They are intentionally removed from Beta 1.3 because the command launchers used PowerShell ExecutionPolicy Bypass and are no longer part of the Windows release package.

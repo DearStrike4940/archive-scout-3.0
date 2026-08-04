@@ -1,0 +1,41 @@
+ARCHIVE SCOUT 3.0 BETA 1.3 PATCH MANIFEST
+
+Replace or add these files:
+- .github/workflows/build-and-release.yml
+- CHANGELOG.md
+- README.md
+- RELEASE_NOTES.md
+- REPOSITORY_DETAILS.md
+- SOURCE_VALIDATION.txt
+- UPLOAD_CHECKLIST.txt
+- archive_scout/constants.py
+- archive_scout/network/curl_backend.py
+- archive_scout/network/transports.py
+- archive_scout/ui/dashboard.py
+- archive_scout/ui/main_window.py
+- docs/DEVELOPMENT.md
+- docs/GITHUB_SETUP.md
+- docs/WINDOWS_RELEASE_SECURITY.md
+- examples/ogrish_911.project.json
+- packaging/windows/README-WINDOWS.txt
+- packaging/windows/version_info.txt
+- pyproject.toml
+- requirements-build.txt
+- scripts/build_linux.sh
+- scripts/build_macos.sh
+- scripts/build_windows.ps1
+- scripts/create_defender_submission.ps1
+- scripts/generate_sbom.py
+- scripts/generate_sha256_manifest.py
+- scripts/package_windows.ps1
+- scripts/verify_windows_signature.ps1
+- tests/unit/test_beta1_3_windows_security.py
+
+Delete these files:
+- packaging/windows/Install Archive Scout.cmd
+- packaging/windows/Uninstall Archive Scout.cmd
+- packaging/windows/install.ps1
+- packaging/windows/uninstall.ps1
+
+The patch contains the hidden .github workflow directory.
+The complete repository ZIP is the safest update because ZIP overlays cannot delete obsolete files automatically.
