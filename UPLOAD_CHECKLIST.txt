@@ -1,17 +1,19 @@
-ARCHIVE SCOUT 3.0 BETA 1.3 UPLOAD CHECKLIST
+ARCHIVE SCOUT 3.0 BETA 1.2 UPLOAD CHECKLIST
 
-1. Back up the current repository and one important project.
-2. Extract archive-scout-3.0-beta1.3-repository.zip.
-3. Upload the CONTENTS of the archive-scout-3.0-beta1.3 folder to the repository root, including `.github`.
-4. Run the Tests workflow.
-5. Run Build All Platforms manually and smoke-test the unsigned test artifacts.
-6. Configure Azure Artifact Signing and the GitHub variables/secrets in docs/WINDOWS_RELEASE_SECURITY.md.
-7. Confirm ENABLE_WINDOWS_ARTIFACT_SIGNING=true.
-8. Tag v3.0.0-beta.1.3.
-9. Confirm the tagged Windows job reports a Valid Authenticode signature.
-10. Confirm all eight release assets are public.
-11. Extract the Windows ZIP and verify ArchiveScout-Windows-x64.signature.txt, SHA256SUMS.txt, and the SPDX SBOM.
-12. Test the signed executable with current Microsoft Defender definitions.
-13. Submit any remaining Wacatac false positive to Microsoft with the exact SHA-256 and keep the submission ID.
-14. Run a long index and confirm Dashboard totals change automatically without pressing Refresh.
-15. Test README latest-release links while logged out.
+1. Back up the current Archive Scout 3.0 repository and one important project.
+2. Extract archive-scout-3.0-beta1.2-repository.zip.
+3. Open the archive-scout-3.0-beta1.2 folder.
+4. Reveal hidden files with Command + Shift + . on macOS.
+5. Upload the CONTENTS of that folder to the repository root.
+6. Confirm .github/workflows is present.
+7. Run the Tests workflow.
+8. Run Build All Platforms from the newest main commit.
+9. Smoke-test the generated Windows, Linux, and macOS packages.
+10. Open a copy of a large Beta 1 project and confirm project.json adopts the new defaults when the old defaults were unchanged.
+11. Resume a broad wildcard index and confirm the Activity page reports yearly page progress and parallel page batches.
+12. Stop and resume during indexing; confirm completed pages are not repeated.
+13. Run media indexing after a completed normal site index and confirm the Activity page reports local index reuse.
+14. Test at least one Windows machine that previously experienced repeated CDX timeouts.
+15. Publish tag v3.0.0-beta.1.3.1.
+16. Confirm all six release assets are public.
+17. Test the README latest-release links while logged out.

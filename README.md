@@ -2,7 +2,7 @@
 
 Archive Scout is a cross-platform desktop research application for indexing public Wayback Machine captures, downloading archived pages and media, searching saved material, reconstructing forums, recovering legacy embeds, comparing snapshots, and reviewing large archive projects.
 
-Archive Scout 3.0 Beta 1.3 is the Windows release-security and live-dashboard patch. It preserves the complete Beta 1.2 indexing engine and database schema version 5 while hardening the Windows package, adding optional Authenticode signing in GitHub Actions, and updating dashboard totals automatically during long-running operations.
+Archive Scout 3.0 Beta 1.2 is the indexing-performance release. It preserves the complete Alpha 4/Beta 1 feature set, the Beta 1.1 CDX/media fixes, and database schema version 5 while replacing the slow serial broad-index path with bounded parallel CDX page retrieval.
 
 One repository produces builds for Windows x64, Linux x64, and universal macOS for Intel and Apple Silicon.
 
@@ -15,27 +15,6 @@ One repository produces builds for Windows x64, Linux x64, and universal macOS f
 ### macOS installation
 
 Extract the ZIP, drag `Archive Scout.app` into `/Applications`, and launch the installed copy. Quit Archive Scout completely before replacing it with a newer release. Do not move, rename, delete, or overwrite the `.app` while it is running.
-
-### Windows installation and verification
-
-Extract the complete ZIP, open the `ArchiveScout` folder, and run `ArchiveScout.exe`. Beta 1.3 remains an on-directory application and does not unpack an embedded executable into a temporary folder. The Windows package includes a file-hash manifest and SPDX software bill of materials. Official tagged releases are intended to be Authenticode signed after the repository owner configures Microsoft Artifact Signing.
-
-The old PowerShell/command-file installer is no longer included. This removes `ExecutionPolicy Bypass` launchers from the distributed ZIP without changing Archive Scout's indexing, downloading, scanning, media, analysis, or project features.
-
-## Beta 1.3 Windows-security and live-dashboard patch
-
-- Explicitly disables UPX in the Windows PyInstaller build.
-- Embeds stable product, version, description, publisher, and filename metadata in `ArchiveScout.exe`.
-- Keeps the existing `--onedir` package layout.
-- Removes PowerShell installer and uninstaller launchers from the release ZIP.
-- Removes the external curl subprocess fallback from Windows builds; Windows retains the in-process `httpx` and `urllib3` transports.
-- Keeps the optional curl fallback available in Linux and macOS source/builds.
-- Adds optional Microsoft Artifact Signing through GitHub Actions.
-- Refuses to publish a tagged Windows release when signing has not been enabled.
-- Verifies the Authenticode signature before the final ZIP and hashes are created.
-- Generates `SHA256SUMS.txt`, an external package-file manifest, a signature report, and an SPDX 2.3 SBOM.
-- Refreshes Dashboard capture, document, match, and open-error totals automatically while work is active and while the Dashboard is visible.
-- Uses a read-only, short-timeout dashboard connection so the interface never migrates or mutates the project merely to refresh counters.
 
 ## Beta 1.2 indexing-performance patch
 
@@ -59,11 +38,11 @@ New projects use 25,000-row resume pages, six CDX page blocks, six page workers,
 
 ### Rebuilt Wayback connection layer
 
-Archive Scout no longer depends on one Python HTTP path succeeding forever. In Automatic mode, it can use two independent in-process connection methods on Windows and a third optional method on Linux/macOS:
+Archive Scout no longer depends on one Python HTTP path succeeding forever. In Automatic mode, it can use three independent connection methods:
 
 1. `httpx`, with persistent connections and operating-system proxy support;
 2. `urllib3`, as an independent pooled Python fallback;
-3. on Linux and macOS only, the operating system's `curl`, when available, using HTTP/1.1 and IPv4 as a final fallback.
+3. the operating system's `curl`, when available, using HTTP/1.1 and IPv4 as a final fallback.
 
 The last successful method is preferred on later requests. A failed method is temporarily cooled down while Archive Scout tries another one. This is intended to overcome Windows-specific proxy, TLS, DNS, connection-pool, and read-timeout failures without turning them into fatal application tracebacks.
 
@@ -180,7 +159,7 @@ The Dashboard provides:
 The Settings page provides:
 
 ```text
-Network backend: Automatic, httpx, or urllib3 on Windows; curl is also available on Linux/macOS
+Network backend: Automatic, httpx, urllib3, or curl
 CDX endpoint: Automatic, standard CDX, or timemap
 Index strategy: Automatic, paged, or resume key
 Parallel CDX page requests
@@ -406,6 +385,6 @@ Each package has a corresponding `.sha256` file.
 
 ## Release status
 
-`3.0.0-beta.1.3` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
+`3.0.0-beta.1.3.1` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
 
 See [CHANGELOG.md](CHANGELOG.md), [ROADMAP.md](ROADMAP.md), and [SOURCE_VALIDATION.txt](SOURCE_VALIDATION.txt).

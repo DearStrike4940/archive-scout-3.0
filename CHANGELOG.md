@@ -1,19 +1,12 @@
+# Archive Scout 3.0 Beta 1.3.1
+
+- Restored Beta 1.2.1 application and network behavior.
+- Added live read-only Dashboard counters.
+- Added Windows version metadata and disabled UPX.
+- Added optional Microsoft Artifact Signing for tagged Windows releases.
+- Removed Beta 1.3 SBOM/runtime-security test dependencies from the test suite.
+
 # Changelog
-
-## 3.0.0-beta.1.3
-
-- Hardened the Windows package against Defender/SmartScreen false positives without changing application features
-- Kept PyInstaller on-directory packaging and explicitly disabled UPX
-- Added stable Windows version-resource metadata to `ArchiveScout.exe`
-- Removed PowerShell and command-file installer launchers from the distributed Windows ZIP
-- Removed the external curl subprocess fallback from Windows builds while retaining in-process httpx and urllib3 transports
-- Kept curl available as an optional dynamically loaded fallback on Linux and macOS
-- Added optional Microsoft Artifact Signing and Authenticode verification to GitHub Actions
-- Blocked tagged Windows releases when Artifact Signing is not configured
-- Added package file hashes, an SPDX 2.3 SBOM, and a signature-status report
-- Added automatic live Dashboard refresh during active operations and while the Dashboard is visible
-- Added short-timeout read-only dashboard queries to avoid interfering with batch writes
-- Expanded the automated suite with Windows-security, transport, SBOM, and live-dashboard regression tests
 
 ## 3.0.0-beta.1.2.1
 

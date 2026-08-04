@@ -427,8 +427,6 @@ class ArchiveScoutApp(tk.Tk):
             self.dashboard_matches_var.set(f"{counts['matches']:,}")
             self.dashboard_errors_var.set(f"{counts['errors']:,}")
         except Exception as exc:
-            # A writer can briefly own the SQLite lock during a batch commit. Keep
-            # the last good numbers and silently try again on the next live tick.
             if not (self.worker_thread and self.worker_thread.is_alive()):
                 self.dashboard_project_var.set(f"{root} — {exc}")
 
@@ -714,7 +712,7 @@ class ArchiveScoutApp(tk.Tk):
 
         ttk.Label(tab, text="Network recovery", style="Section.TLabel").grid(row=0, column=2, columnspan=2, sticky="w", pady=(0, 6))
         network_rows = [
-            ("Connection backend", self.network_backend_var, (("auto", "httpx", "urllib3") if os.name == "nt" else ("auto", "httpx", "urllib3", "curl"))),
+            ("Connection backend", self.network_backend_var, ("auto", "httpx", "urllib3", "curl")),
             ("CDX endpoint", self.network_endpoint_var, ("auto", "cdx", "timemap")),
             ("Index strategy", self.network_strategy_var, ("auto", "paged", "resume")),
         ]
@@ -1582,7 +1580,7 @@ class ArchiveScoutApp(tk.Tk):
         self.rate_limit_max_var.set(str(config.rate_limit_max_pause))
         self.rate_limit_wait_var.set(str(config.rate_limit_max_wait / 60.0))
         network = config.network.normalized()
-        self.network_backend_var.set("auto" if os.name == "nt" and network.backend == "curl" else network.backend)
+        self.network_backend_var.set(network.backend)
         self.network_endpoint_var.set(network.endpoint_mode)
         self.network_strategy_var.set(network.index_strategy)
         self.network_page_blocks_var.set(str(network.page_blocks))

@@ -2,7 +2,7 @@
 
 Product: `Archive Scout 3.0`
 
-Release: `3.0.0-beta.1.3`
+Release: `3.0.0-beta.1.3.1`
 
 Database schema: `5`
 
@@ -20,11 +20,11 @@ ArchiveScout-Linux-x64.tar.gz
 ArchiveScout-macOS-Universal.zip
 ```
 
-Each package has a corresponding `.sha256` file. The Windows release also publishes a file manifest and SPDX SBOM.
+Each package has a corresponding `.sha256` file.
 
-## Beta 1.3 focus
+## Beta 1.2 focus
 
-Beta 1.3 preserves the Beta 1.2 performance engine and hardens the Windows release while making Dashboard totals live.
+Beta 1.2 is a performance patch over the Alpha 4/Beta 1 integration release and the Beta 1.1 CDX/media hotfix.
 
 Indexing systems:
 
@@ -41,8 +41,7 @@ Indexing systems:
 
 Reliability systems:
 
-- Windows in-process HTTP transport: httpx and urllib3
-- optional dynamically loaded curl fallback on Linux and macOS
+- multi-backend HTTP transport: httpx, urllib3, and curl
 - system proxy and certificate-environment support
 - CDX endpoint rotation and last-success preference
 - no backend/endpoint cascade after a read timeout
@@ -53,7 +52,7 @@ Reliability systems:
 
 Interface systems:
 
-- live-refreshing dashboard and left navigation
+- dashboard and left navigation
 - Simple and Advanced modes
 - System, Light, and Dark themes
 - font scaling and persistent interface state
@@ -66,4 +65,4 @@ The macOS build verifies `Contents/Resources/base_library.zip`, the executable, 
 
 ## Repository upload
 
-Upload the contents of the extracted `archive-scout-3.0-beta1.3` folder to the repository root. The hidden `.github` folder must be included.
+Upload the contents of the extracted `archive-scout-3.0-beta1.2` folder to the repository root. The hidden `.github` folder must be included.
