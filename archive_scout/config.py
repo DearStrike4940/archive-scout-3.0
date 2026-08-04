@@ -131,7 +131,8 @@ class NetworkConfig:
     trust_environment: bool = True
     endpoint_mode: str = "auto"
     index_strategy: str = "auto"
-    page_blocks: int = 1
+    page_blocks: int = 6
+    cdx_workers: int = 6
     persistent_retries: bool = True
     retry_base_seconds: float = 5.0
     retry_max_seconds: float = 300.0
@@ -154,6 +155,7 @@ class NetworkConfig:
             endpoint_mode=endpoint,
             index_strategy=strategy,
             page_blocks=min(50, max(1, int(self.page_blocks))),
+            cdx_workers=min(12, max(1, int(self.cdx_workers))),
             persistent_retries=bool(self.persistent_retries),
             retry_base_seconds=max(1.0, float(self.retry_base_seconds)),
             retry_max_seconds=max(float(self.retry_base_seconds), float(self.retry_max_seconds)),
@@ -184,8 +186,8 @@ class ProjectConfig:
     download_scope: str = "all_text"
     minimum_score: int = 1
     max_file_mb: float = 25.0
-    page_size: int = 5000
-    cdx_delay: float = 1.0
+    page_size: int = 25000
+    cdx_delay: float = 0.75
     download_delay: float = 0.5
     retries: int = 4
     rate_limit_base_pause: float = 30.0
@@ -286,7 +288,7 @@ class ProjectConfig:
             download_scope=self.download_scope if self.download_scope in {"all_text", "keyword_urls", "index_only"} else "all_text",
             minimum_score=max(1, int(self.minimum_score)),
             max_file_mb=max(0.1, float(self.max_file_mb)),
-            page_size=min(10000, max(100, int(self.page_size))),
+            page_size=min(50000, max(100, int(self.page_size))),
             cdx_delay=max(0.0, float(self.cdx_delay)),
             download_delay=max(0.0, float(self.download_delay)),
             retries=min(12, max(1, int(self.retries))),
@@ -352,6 +354,18 @@ def load_project_config(path: Path) -> ProjectConfig:
     media_payload = payload.get("media") or {}
     analysis_payload = payload.get("analysis") or {}
     network_payload = payload.get("network") or {}
+    source_version = str(payload.get("version") or "")
+    legacy_beta1 = source_version.startswith("3.0.0-beta.1") and not source_version.startswith("3.0.0-beta.1.2")
+    loaded_page_size = int(payload.get("page_size", 25000))
+    loaded_cdx_delay = float(payload.get("cdx_delay", 0.75))
+    loaded_page_blocks = int(network_payload.get("page_blocks", 6))
+    if legacy_beta1:
+        if loaded_page_size == 5000:
+            loaded_page_size = 25000
+        if loaded_cdx_delay == 1.0:
+            loaded_cdx_delay = 0.75
+        if loaded_page_blocks == 1:
+            loaded_page_blocks = 6
     return ProjectConfig(
         output_dir=Path(payload.get("output_dir") or path.parent),
         targets=list(payload.get("targets") or []),
@@ -370,8 +384,8 @@ def load_project_config(path: Path) -> ProjectConfig:
         download_scope=str(payload.get("download_scope", "all_text")),
         minimum_score=int(payload.get("minimum_score", 1)),
         max_file_mb=float(payload.get("max_file_mb", 25.0)),
-        page_size=int(payload.get("page_size", 5000)),
-        cdx_delay=float(payload.get("cdx_delay", 1.0)),
+        page_size=loaded_page_size,
+        cdx_delay=loaded_cdx_delay,
         download_delay=float(payload.get("download_delay", 0.5)),
         retries=int(payload.get("retries", 4)),
         rate_limit_base_pause=float(payload.get("rate_limit_base_pause", 30.0)),
@@ -416,7 +430,8 @@ def load_project_config(path: Path) -> ProjectConfig:
             trust_environment=bool(network_payload.get("trust_environment", True)),
             endpoint_mode=str(network_payload.get("endpoint_mode", "auto")),
             index_strategy=str(network_payload.get("index_strategy", "auto")),
-            page_blocks=int(network_payload.get("page_blocks", 1)),
+            page_blocks=loaded_page_blocks,
+            cdx_workers=int(network_payload.get("cdx_workers", 6)),
             persistent_retries=bool(network_payload.get("persistent_retries", True)),
             retry_base_seconds=float(network_payload.get("retry_base_seconds", 5.0)),
             retry_max_seconds=float(network_payload.get("retry_max_seconds", 300.0)),

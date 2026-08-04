@@ -1,5 +1,27 @@
 # Changelog
 
+## 3.0.0-beta.1.2
+
+- Rebuilt broad CDX indexing around one resumable yearly page queue instead of twelve serial monthly page-count/index cycles
+- Added bounded parallel CDX page retrieval with six workers by default and one shared fixed start-rate limiter
+- Increased the default CDX page-block size from one to six and the resume-key page size from 5,000 to 25,000
+- Changed the default CDX spacing from 1.0 to 0.75 seconds, matching a controlled ceiling of 80 request starts per minute
+- Made bulk page and resume retrieval request line-oriented text first, retaining JSON as a compatibility fallback
+- Added per-page failure queues so slow pages are retried without discarding or repeating successful sibling pages
+- Added automatic fallback from a repeatedly slow page to smaller resume-key windows while retaining already stored page data
+- Removed duplicate immediate CDX retries; the persistent page/window queue now owns retries so a timeout does not consume the full timeout twice before recovery begins
+- Persisted page retry lists and per-page failure counts in index-plan version 5
+- Prevented one read timeout from repeating the same full wait across every HTTP backend and every CDX endpoint
+- Added automatic page-count timeout fallback to resumable smaller windows rather than repeatedly counting the same broad query
+- Added a third timemap JSON endpoint and remembered the last successful endpoint
+- Added compatible-state adoption so old Beta 1 indexes are not discarded only because transport page-size defaults changed
+- Applied the same parallel page engine to combined media indexing
+- Added local media-index reuse: a completed normal site index can populate media captures without a second CDX traversal
+- Added SQLite memory temp storage, a 64 MiB cache, 256 MiB memory mapping, a larger WAL checkpoint interval, and a 60-second busy timeout
+- Added a Parallel CDX page requests control to Settings
+- Added nine focused speed, fallback, resumability, and media-reuse regression tests
+- Expanded the automated suite to 85 tests
+
 ## 3.0.0-beta.1.1
 
 - Changed malformed or truncated HTTP 200 CDX JSON responses from fatal `RuntimeError` failures into resumable transient failures

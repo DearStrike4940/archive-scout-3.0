@@ -102,7 +102,7 @@ class V3NetworkRecoveryTests(unittest.TestCase):
             ).normalized()
             database = open_database(root)
             transient = TransientRequestError("offline", timed_out=True, splittable=True)
-            with patch("archive_scout.cdx.client.HttpClient.get_json_any", side_effect=transient), patch(
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", side_effect=transient), patch(
                 "archive_scout.cdx.indexer.transient_backoff", return_value=0
             ):
                 with self.assertRaises(ConnectivityPaused):

@@ -49,7 +49,7 @@ class Alpha3MediaIndexTests(unittest.TestCase):
                 ["timestamp", "original", "mimetype", "statuscode", "digest", "length"],
                 ["20010101010101", "http://example.com/photo.jpg", "image/jpeg", "200", "ABC", "12"],
             ]
-            with patch("archive_scout.cdx.client.HttpClient.get_json_any", return_value=payload) as mocked:
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", return_value=payload) as mocked:
                 index_media(config, database, threading.Event())
             self.assertEqual(mocked.call_count, 1)
             capture = database.execute("SELECT query_signature,state FROM media_captures").fetchone()
@@ -82,7 +82,7 @@ class Alpha3MediaIndexTests(unittest.TestCase):
                 ),
             ).normalized()
             database = open_database(root)
-            with patch("archive_scout.cdx.client.HttpClient.get_json_any", return_value=[]) as mocked:
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", return_value=[]) as mocked:
                 index_media(config, database, threading.Event())
             self.assertEqual(mocked.call_count, 1)
             params = mocked.call_args.args[1]

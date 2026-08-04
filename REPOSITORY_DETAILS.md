@@ -2,7 +2,7 @@
 
 Product: `Archive Scout 3.0`
 
-Release: `3.0.0-beta.1.1`
+Release: `3.0.0-beta.1.2`
 
 Database schema: `5`
 
@@ -22,36 +22,42 @@ ArchiveScout-macOS-Universal.zip
 
 Each package has a corresponding `.sha256` file.
 
-## Beta 1 scope
+## Beta 1.2 focus
 
-This repository combines the planned Alpha 4 integration and reliability milestone with the planned Beta 1 interface redesign.
+Beta 1.2 is a performance patch over the Alpha 4/Beta 1 integration release and the Beta 1.1 CDX/media hotfix.
 
-Major reliability systems:
+Indexing systems:
+
+- one yearly page queue for broad CDX targets
+- six bounded parallel page requests by default
+- six CDX blocks per page by default
+- 80 request starts per minute through one shared fixed limiter
+- text-first bulk CDX parsing with JSON fallback
+- per-page retry queues and exact resume state
+- page-count timeout fallback to smaller resume-key windows
+- completed-state adoption across compatible Beta 1 page-size defaults
+- media reuse from the normal site index
+- one combined media extension query
+
+Reliability systems:
 
 - multi-backend HTTP transport: httpx, urllib3, and curl
 - system proxy and certificate-environment support
-- CDX endpoint rotation
-- paged and resume-key indexing strategies
-- persisted CDX queues and graceful connectivity pauses
+- CDX endpoint rotation and last-success preference
+- no backend/endpoint cascade after a read timeout
 - coordinated HTTP 429 recovery
-- combined direct-media indexing
+- persisted CDX queues and graceful connectivity pauses
 - schema version 5 operation, network-event, backup, and repair records
-- crash recovery
-- project backup, restore, repair, and diagnostics
-- per-target settings
+- crash recovery, project backup, restore, repair, and diagnostics
 
-Major interface systems:
+Interface systems:
 
-- dashboard
-- left navigation
+- dashboard and left navigation
 - Simple and Advanced modes
 - System, Light, and Dark themes
-- font scaling
-- persistent interface state
-- paginated results
-- visual review states
-- project-maintenance controls
-- network-recovery controls
+- font scaling and persistent interface state
+- paginated results and visual review states
+- CDX page-block and parallel-page controls
 
 ## macOS bundle integrity
 
@@ -59,4 +65,4 @@ The macOS build verifies `Contents/Resources/base_library.zip`, the executable, 
 
 ## Repository upload
 
-Upload the contents of the extracted `archive-scout-3.0-beta1` folder to the root of a new GitHub repository. The hidden `.github` folder must be included.
+Upload the contents of the extracted `archive-scout-3.0-beta1.2` folder to the repository root. The hidden `.github` folder must be included.

@@ -29,7 +29,7 @@ class IndexRecoveryTests(unittest.TestCase):
                 network=NetworkConfig(index_strategy="resume"),
             ).normalized()
             database = open_database(root)
-            with patch("archive_scout.cdx.client.HttpClient.get_json_any", return_value=[]) as mocked:
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", return_value=[]) as mocked:
                 index_archive(config, database, threading.Event())
             self.assertEqual(mocked.call_count, 12)
             state = database.execute("SELECT complete,seen,resume_key FROM index_state").fetchone()
@@ -58,7 +58,7 @@ class IndexRecoveryTests(unittest.TestCase):
                 splittable=True,
             )
             with patch(
-                "archive_scout.cdx.client.HttpClient.get_json_any",
+                "archive_scout.cdx.client.HttpClient.get_cdx_any",
                 side_effect=[timeout, [], [], [], [], []],
             ) as mocked:
                 index_archive(config, database, threading.Event())
@@ -89,15 +89,15 @@ class IndexRecoveryTests(unittest.TestCase):
                 splittable=True,
             )
             with patch(
-                "archive_scout.cdx.client.HttpClient.get_json_any",
+                "archive_scout.cdx.client.HttpClient.get_cdx_any",
                 side_effect=[timeout, Stopped()],
             ):
                 with self.assertRaises(Stopped):
                     index_archive(config, database, threading.Event())
             state = database.execute("SELECT complete,resume_key FROM index_state").fetchone()
             self.assertEqual(state["complete"], 0)
-            self.assertIn('"version":4', state["resume_key"])
-            with patch("archive_scout.cdx.client.HttpClient.get_json_any", return_value=[]) as mocked:
+            self.assertIn('"version":5', state["resume_key"])
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", return_value=[]) as mocked:
                 index_archive(config, database, threading.Event())
             self.assertEqual(mocked.call_count, 5)
             state = database.execute("SELECT complete,resume_key FROM index_state").fetchone()
@@ -119,7 +119,7 @@ class IndexRecoveryTests(unittest.TestCase):
             ).normalized()
             database = open_database(root)
             with patch(
-                "archive_scout.cdx.client.HttpClient.get_json_any",
+                "archive_scout.cdx.client.HttpClient.get_cdx_any",
                 side_effect=[RateLimitDeferred("server busy", waited=60), []],
             ), patch("archive_scout.cdx.indexer.transient_backoff", return_value=0):
                 index_archive(config, database, threading.Event())
@@ -141,7 +141,7 @@ class IndexRecoveryTests(unittest.TestCase):
                 cdx_delay=0,
             )
             with patch(
-                "archive_scout.cdx.client.HttpClient.get_json_any",
+                "archive_scout.cdx.client.HttpClient.get_cdx_any",
                 side_effect=RuntimeError("simulated CDX failure"),
             ):
                 with self.assertRaises(RuntimeError):

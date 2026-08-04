@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-VERSION = "3.0.0-beta.1.1"
+VERSION = "3.0.0-beta.1.2"
 SCHEMA_VERSION = 5
 APP_NAME = "Archive Scout 3.0"
 CDX_URL = "https://web.archive.org/cdx/search/cdx"
 CDX_TIMEMAP_URL = "https://web.archive.org/web/timemap/cdx"
-CDX_ENDPOINTS = (CDX_URL, CDX_TIMEMAP_URL)
+CDX_TIMEMAP_JSON_URL = "https://web.archive.org/web/timemap/json"
+CDX_ENDPOINTS = (CDX_URL, CDX_TIMEMAP_URL, CDX_TIMEMAP_JSON_URL)
 REPLAY_URL = "https://web.archive.org/web"
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 TEXT_EXTENSIONS = {

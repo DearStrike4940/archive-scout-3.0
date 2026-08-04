@@ -29,7 +29,7 @@ class Alpha3TimeoutRecoveryTests(unittest.TestCase):
             database = open_database(root)
             timeout = TransientRequestError("read timeout", timed_out=True, splittable=True)
             with patch(
-                "archive_scout.cdx.client.HttpClient.get_json_any",
+                "archive_scout.cdx.client.HttpClient.get_cdx_any",
                 side_effect=[timeout, [], [], [], []],
             ) as mocked:
                 index_archive(config, database, threading.Event())
@@ -54,7 +54,7 @@ class Alpha3TimeoutRecoveryTests(unittest.TestCase):
             ).normalized()
             database = open_database(root)
             timeout = TransientRequestError("read timeout", timed_out=True, splittable=True)
-            with patch("archive_scout.cdx.client.HttpClient.get_json_any", side_effect=[timeout, []]) as mocked, patch(
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", side_effect=[timeout, []]) as mocked, patch(
                 "archive_scout.cdx.indexer.transient_backoff", return_value=0
             ):
                 index_archive(config, database, threading.Event())

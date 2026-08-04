@@ -34,11 +34,11 @@ class V3PagedIndexingTests(unittest.TestCase):
                 ["20010101120000", "http://example.com/page", "text/html", "200", "ABC", "100"],
             ]
 
-            def fake_get_json_any(_self, _urls, params, max_bytes=64 * 1024 * 1024):
+            def fake_get_cdx_any(_self, _urls, params, max_bytes=64 * 1024 * 1024, prefer_text=False):
                 calls.append(list(params))
                 return 1 if len(calls) == 1 else page_payload
 
-            with patch("archive_scout.cdx.client.HttpClient.get_json_any", new=fake_get_json_any):
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", new=fake_get_cdx_any):
                 index_archive(config, database, threading.Event())
 
             self.assertEqual(len(calls), 2)
@@ -63,13 +63,13 @@ class V3PagedIndexingTests(unittest.TestCase):
             ]
             responses = iter([RuntimeError("HTTP 400: pagination unavailable"), resume_payload])
 
-            def fake_get_json_any(_self, _urls, _params, max_bytes=64 * 1024 * 1024):
+            def fake_get_cdx_any(_self, _urls, _params, max_bytes=64 * 1024 * 1024, prefer_text=False):
                 response = next(responses)
                 if isinstance(response, BaseException):
                     raise response
                 return response
 
-            with patch("archive_scout.cdx.client.HttpClient.get_json_any", new=fake_get_json_any):
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", new=fake_get_cdx_any):
                 index_archive(config, database, threading.Event())
 
             self.assertEqual(database.execute("SELECT COUNT(*) FROM captures").fetchone()[0], 1)

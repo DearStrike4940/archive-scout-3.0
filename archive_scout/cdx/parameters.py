@@ -8,7 +8,7 @@ from ..config import ProjectConfig
 from ..utils import parse_cdx_parameter_lines
 
 
-def cdx_query_signature(config: ProjectConfig) -> str:
+def cdx_query_signature(config: ProjectConfig, page_size: int | None = None) -> str:
     payload = {
         "from": config.from_date,
         "to": config.to_date,
@@ -16,10 +16,21 @@ def cdx_query_signature(config: ProjectConfig) -> str:
         "collapses": config.cdx_collapses,
         "match_type": config.cdx_match_type,
         "extra": config.cdx_extra_params,
-        "page_size": config.page_size,
+        "page_size": int(config.page_size if page_size is None else page_size),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+def cdx_query_signatures(config: ProjectConfig) -> tuple[str, ...]:
+    """Return the current signature plus compatible Beta-era page-size variants.
+
+    Page size affects how the same result set is transported, not its meaning.
+    Older Archive Scout builds included it in the signature, so Beta 1.2 can
+    adopt completed work created with the earlier defaults instead of forcing
+    an expensive re-index.
+    """
+    sizes = [config.page_size, 5000, 25000, 1000, 10000, 50000]
+    return tuple(dict.fromkeys(cdx_query_signature(config, size) for size in sizes))
 
 
 def cdx_year_window(config: ProjectConfig, year: int) -> tuple[str, str] | None:
@@ -94,13 +105,13 @@ def parse_cdx(payload: object) -> tuple[list[dict[str, str]], str | None]:
 
 
 def cdx_endpoints(config: ProjectConfig) -> tuple[str, ...]:
-    from ..constants import CDX_URL, CDX_TIMEMAP_URL
+    from ..constants import CDX_URL, CDX_TIMEMAP_JSON_URL, CDX_TIMEMAP_URL
     mode = config.network.normalized().endpoint_mode
     if mode == "cdx":
         return (CDX_URL,)
     if mode == "timemap":
-        return (CDX_TIMEMAP_URL,)
-    return (CDX_URL, CDX_TIMEMAP_URL)
+        return (CDX_TIMEMAP_URL, CDX_TIMEMAP_JSON_URL)
+    return (CDX_URL, CDX_TIMEMAP_URL, CDX_TIMEMAP_JSON_URL)
 
 
 def is_broad_cdx_query(config: ProjectConfig, target: str) -> bool:

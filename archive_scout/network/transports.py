@@ -69,6 +69,26 @@ def is_transport_timeout(exc: BaseException) -> bool:
     return False
 
 
+
+
+def is_transport_read_timeout(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    visited: set[int] = set()
+    read_types = (
+        httpx.ReadTimeout,
+        urllib3.exceptions.ReadTimeoutError,
+    )
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, read_types):
+            return True
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, BaseException) and reason is not current:
+            current = reason
+            continue
+        current = current.__cause__ or current.__context__
+    return False
+
 def _ssl_context() -> ssl.SSLContext:
     return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT) if truststore else ssl.create_default_context()
 
@@ -421,6 +441,15 @@ class ResilientTransport:
                 failures.append((name, exc))
             with self.lock:
                 self.cooldown_until[name] = time.monotonic() + 30.0
+            last_error = failures[-1][1]
+            if is_transport_read_timeout(last_error):
+                # Once a server has accepted the connection and stalled while
+                # returning a CDX body, changing Python HTTP stacks normally
+                # repeats the same long wait. Let the indexer retry or requeue
+                # the page instead of multiplying one timeout by every backend.
+                if self.callback:
+                    self.callback(f"Network backend {name} reached Wayback but the response timed out; requeueing without repeating the full timeout on every backend…")
+                break
             if self.callback:
-                self.callback(f"Network backend {name} failed; trying another connection method…")
+                self.callback(f"Network backend {name} failed during connection setup; trying another connection method…")
         raise TransportExhaustedError(url, failures)

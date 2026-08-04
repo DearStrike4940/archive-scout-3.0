@@ -6,13 +6,33 @@ import random
 import re
 import sqlite3
 import threading
+import time
 from collections import defaultdict
 from typing import Callable
 from urllib.parse import urlsplit
 
 from ..cdx.client import HttpClient, RateLimitDeferred, TransientRequestError
-from ..cdx.indexer import PendingWindow, decode_plan, encode_plan, month_windows, split_window, window_label
-from ..cdx.parameters import cdx_endpoints, cdx_target_value, parse_cdx, parse_num_pages, preferred_index_strategy
+from ..cdx.indexer import (
+    PendingWindow,
+    PagedBatch,
+    _select_page_batch,
+    decode_plan,
+    encode_plan,
+    index_windows,
+    split_window,
+    window_label,
+)
+from ..cdx.parallel import PageFetchResult, fetch_cdx_pages
+from ..cdx.parameters import (
+    cdx_endpoints,
+    cdx_query_signature,
+    cdx_query_signatures,
+    cdx_target_value,
+    cdx_year_window,
+    parse_cdx,
+    parse_num_pages,
+    preferred_index_strategy,
+)
 from ..config import ProjectConfig
 from ..database.repositories import get_or_create_media_target, record_error, upsert_media_capture, upsert_media_captures
 from ..downloads.rate_limit import FixedRateLimiter, SharedHostGate
@@ -23,7 +43,7 @@ from .extensions import allowed_media_url, selected_extensions
 ALL_EXTENSIONS_STATE = "__all__"
 
 
-def media_query_signature(config: ProjectConfig) -> str:
+def media_query_signature(config: ProjectConfig, page_size: int | None = None) -> str:
     media = config.media.normalized()
     payload = {
         "from": config.from_date,
@@ -31,7 +51,7 @@ def media_query_signature(config: ProjectConfig) -> str:
         "filters": config.cdx_filters,
         "collapses": config.cdx_collapses,
         "extra": config.cdx_extra_params,
-        "page_size": config.page_size,
+        "page_size": int(config.page_size if page_size is None else page_size),
         "targets": media.targets or config.targets,
         "extensions": selected_extensions(media),
         "strategy": media.snapshot_strategy,
@@ -44,10 +64,26 @@ def media_query_signature(config: ProjectConfig) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
-def media_index_state_signature(config: ProjectConfig) -> str:
-    payload = {"media_query_signature": media_query_signature(config), "index_revision": 2}
+def media_query_signatures(config: ProjectConfig) -> tuple[str, ...]:
+    sizes = [config.page_size, 5000, 25000, 1000, 10000, 50000]
+    return tuple(dict.fromkeys(media_query_signature(config, size) for size in sizes))
+
+
+def media_index_state_signature(config: ProjectConfig, *, page_size: int | None = None, revision: int = 3) -> str:
+    payload = {"media_query_signature": media_query_signature(config, page_size), "index_revision": int(revision)}
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def media_signature_candidates(config: ProjectConfig) -> tuple[tuple[str, str], ...]:
+    values: list[tuple[str, str]] = []
+    for size in [config.page_size, 5000, 25000, 1000, 10000, 50000]:
+        media_signature = media_query_signature(config, size)
+        for revision in (3, 2):
+            item = (media_signature, media_index_state_signature(config, page_size=size, revision=revision))
+            if item not in values:
+                values.append(item)
+    return tuple(values)
 
 
 def media_target_pattern(target: str, extension: str = "") -> str:
@@ -175,6 +211,113 @@ def _save_media_state(
     )
 
 
+def _adopt_compatible_media_state(
+    database: sqlite3.Connection,
+    target_id: int,
+    year: int,
+    config: ProjectConfig,
+    signature: str,
+    state_signature: str,
+) -> None:
+    existing = database.execute(
+        "SELECT 1 FROM media_index_state WHERE target_id=? AND extension=? AND year=? AND query_signature=?",
+        (target_id, ALL_EXTENSIONS_STATE, year, state_signature),
+    ).fetchone()
+    if existing:
+        return
+    start, end = cdx_year_window(config, year) or (f"{year:04d}0101000000", f"{year:04d}1231235959")
+    for candidate_signature, candidate_state in media_signature_candidates(config):
+        if candidate_state == state_signature:
+            continue
+        state = database.execute(
+            "SELECT resume_key,complete,seen,error_id,updated_at FROM media_index_state "
+            "WHERE target_id=? AND extension=? AND year=? AND query_signature=?",
+            (target_id, ALL_EXTENSIONS_STATE, year, candidate_state),
+        ).fetchone()
+        if not state:
+            continue
+        if candidate_signature != signature:
+            database.execute(
+                "UPDATE OR IGNORE media_captures SET query_signature=? "
+                "WHERE target_id=? AND query_signature=? AND timestamp BETWEEN ? AND ?",
+                (signature, target_id, candidate_signature, start, end),
+            )
+            database.execute(
+                "DELETE FROM media_captures WHERE target_id=? AND query_signature=? AND timestamp BETWEEN ? AND ?",
+                (target_id, candidate_signature, start, end),
+            )
+        database.execute(
+            "INSERT INTO media_index_state(target_id,extension,year,query_signature,resume_key,complete,seen,error_id,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (target_id, ALL_EXTENSIONS_STATE, year, state_signature, state["resume_key"], state["complete"], state["seen"], state["error_id"], state["updated_at"]),
+        )
+        database.execute(
+            "DELETE FROM media_index_state WHERE target_id=? AND extension=? AND year=? AND query_signature=?",
+            (target_id, ALL_EXTENSIONS_STATE, year, candidate_state),
+        )
+        return
+
+
+def _reuse_completed_main_index(
+    config: ProjectConfig,
+    database: sqlite3.Connection,
+    target: str,
+    media_target_id: int,
+    year: int,
+    media_signature: str,
+    state_signature: str,
+) -> tuple[bool, int, int]:
+    """Populate media rows from a completed normal index without another CDX pass."""
+    target_row = database.execute("SELECT id FROM targets WHERE pattern=?", (target,)).fetchone()
+    if not target_row:
+        return False, 0, 0
+    normal_target_id = int(target_row["id"])
+    reusable_signature = None
+    for candidate in cdx_query_signatures(config):
+        row = database.execute(
+            "SELECT complete FROM index_state WHERE target_id=? AND year=? AND query_signature=?",
+            (normal_target_id, year, candidate),
+        ).fetchone()
+        if row and row["complete"]:
+            reusable_signature = candidate
+            break
+    if reusable_signature is None:
+        return False, 0, 0
+
+    start, end = cdx_year_window(config, year) or (f"{year:04d}0101000000", f"{year:04d}1231235959")
+    media = config.media.normalized()
+    seen = 0
+    changed = 0
+    cursor = database.execute(
+        "SELECT original_url,timestamp,mimetype,statuscode,digest,length FROM captures "
+        "WHERE target_id=? AND query_signature=? AND timestamp BETWEEN ? AND ? ORDER BY id",
+        (normal_target_id, reusable_signature, start, end),
+    )
+    while True:
+        batch = cursor.fetchmany(10000)
+        if not batch:
+            break
+        accepted: list[tuple[dict[str, str], str, str]] = []
+        seen += len(batch)
+        for item in batch:
+            row = {
+                "original": str(item["original_url"]),
+                "timestamp": str(item["timestamp"]),
+                "mimetype": str(item["mimetype"] or ""),
+                "statuscode": str(item["statuscode"] or ""),
+                "digest": str(item["digest"] or ""),
+                "length": str(item["length"] or 0),
+            }
+            allowed, kind, extension = allowed_media_url(row["original"], media, row["mimetype"])
+            if allowed and kind:
+                accepted.append((row, kind, extension))
+        changed += upsert_media_captures(
+            database, accepted, media_target_id, media_signature, source_type="main_index"
+        )
+    _save_media_state(database, media_target_id, year, state_signature, None, True, seen, None)
+    return True, seen, changed
+
+
 def _wait_seconds(config: ProjectConfig, failures: int) -> float:
     network = config.network.normalized()
     base = min(network.retry_max_seconds, network.retry_base_seconds * 2 ** min(max(0, failures - 1), 6))
@@ -201,7 +344,8 @@ def _defer_media_window(
 ) -> int:
     current.failures += 1
     current.page_size = max(25, (current.page_size or config.page_size) // 2)
-    current.page_blocks = max(1, current.page_blocks // 2)
+    if current.strategy != "paged":
+        current.page_blocks = max(1, current.page_blocks // 2)
     with database:
         error_id = record_error(
             database,
@@ -239,38 +383,85 @@ def _defer_media_window(
     return error_id
 
 
-def _request_media_window(
+def _resolve_media_strategy(current: PendingWindow, config: ProjectConfig, target: str) -> None:
+    if current.strategy not in {"paged", "resume"}:
+        current.strategy = preferred_index_strategy(config, target)
+    if not current.pagination_supported and current.strategy == "paged":
+        current.strategy = "resume"
+    if current.page_blocks <= 0:
+        current.page_blocks = config.network.normalized().page_blocks
+
+
+def _request_media_paged_batch(
+    config: ProjectConfig,
+    client: HttpClient,
+    target: str,
+    current: PendingWindow,
+    extensions: list[str],
+    stop_event: threading.Event,
+) -> PagedBatch:
+    endpoints = cdx_endpoints(config)
+    network = config.network.normalized()
+    if current.page_count < 0:
+        payload = client.get_cdx_any(
+            endpoints,
+            build_media_num_pages_params(config, target, current.start, current.end, extensions, current.page_blocks),
+            max_bytes=1024 * 1024,
+            prefer_text=True,
+        )
+        current.page_count = parse_num_pages(payload)
+        current.page = min(current.page, current.page_count)
+        current.retry_pages = [page for page in current.retry_pages if page < current.page_count]
+    if current.page >= current.page_count and not current.retry_pages:
+        return PagedBatch([], [], True)
+
+    pages, next_page = _select_page_batch(current, network.cdx_workers)
+    if not pages:
+        return PagedBatch([], [], True)
+    results = fetch_cdx_pages(
+        client,
+        endpoints,
+        pages,
+        lambda page: build_media_paged_params(
+            config, target, current.start, current.end, extensions, page, current.page_blocks
+        ),
+        stop_event,
+        workers=network.cdx_workers,
+        max_bytes=max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024),
+    )
+    current.page = next_page
+    retry_set = set(current.retry_pages)
+    for result in results:
+        if result.succeeded:
+            retry_set.discard(result.page)
+            current.page_failures.pop(result.page, None)
+        else:
+            retry_set.add(result.page)
+            current.page_failures[result.page] = current.page_failures.get(result.page, 0) + 1
+    current.retry_pages = sorted(retry_set)
+    return PagedBatch(results, pages, current.page >= current.page_count and not current.retry_pages)
+
+
+def _request_media_resume(
     config: ProjectConfig,
     client: HttpClient,
     target: str,
     current: PendingWindow,
     extensions: list[str],
 ) -> tuple[list[dict[str, str]], bool]:
-    if current.strategy not in {"paged", "resume"}:
-        current.strategy = preferred_index_strategy(config, target)
-    endpoints = cdx_endpoints(config)
-    if current.strategy == "paged" and current.pagination_supported:
-        if current.page_count < 0:
-            payload = client.get_json_any(
-                endpoints,
-                build_media_num_pages_params(config, target, current.start, current.end, extensions, current.page_blocks),
-                max_bytes=1024 * 1024,
-            )
-            current.page_count = parse_num_pages(payload)
-        if current.page >= current.page_count:
-            return [], True
-        payload = client.get_json_any(
-            endpoints,
-            build_media_paged_params(config, target, current.start, current.end, extensions, current.page, current.page_blocks),
-        )
-        rows, _ = parse_cdx(payload)
-        current.page += 1
-        return rows, current.page >= current.page_count
-
     page_size = current.page_size or config.page_size
-    payload = client.get_json_any(
-        endpoints,
-        build_media_params(config, target, current.start, current.end, current.resume_key, page_size=page_size, extensions=extensions),
+    payload = client.get_cdx_any(
+        cdx_endpoints(config),
+        build_media_params(
+            config,
+            target,
+            current.start,
+            current.end,
+            current.resume_key,
+            page_size=page_size,
+            extensions=extensions,
+        ),
+        prefer_text=True,
     )
     rows, next_resume = parse_cdx(payload)
     if next_resume:
@@ -279,6 +470,37 @@ def _request_media_window(
         current.resume_key = next_resume
         return rows, False
     return rows, True
+
+
+def _media_failure_error(failures: list[PageFetchResult]) -> BaseException:
+    if not failures:
+        return TransientRequestError("unknown paged media CDX failure", splittable=False)
+    return failures[0].error or TransientRequestError("unknown paged media CDX failure", splittable=False)
+
+
+def _pagination_unavailable(exc: BaseException) -> bool:
+    message = str(exc)
+    return isinstance(exc, RuntimeError) and ("HTTP 400" in message or "page-count" in message)
+
+
+def _permanent_media_page_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TransientRequestError, RateLimitDeferred)):
+        return False
+    if _pagination_unavailable(exc):
+        return False
+    return isinstance(exc, RuntimeError)
+
+
+def _accept_media_rows(
+    rows: list[dict[str, str]],
+    media,
+) -> list[tuple[dict[str, str], str, str]]:
+    accepted: list[tuple[dict[str, str], str, str]] = []
+    for row in rows:
+        allowed, kind, actual_extension = allowed_media_url(row["original"], media, row.get("mimetype", ""))
+        if allowed and kind:
+            accepted.append((row, kind, actual_extension))
+    return accepted
 
 
 def index_direct_media(
@@ -297,7 +519,7 @@ def index_direct_media(
     for target in targets:
         target_config = config.for_target(target) if target in config.targets else config
         for year in range(target_config.from_year, target_config.to_year + 1):
-            windows = month_windows(target_config, year)
+            windows = index_windows(target_config, target, year)
             if windows:
                 tasks.append((target, target_config, year, windows))
     total = sum(len(windows) for _, _, _, windows in tasks)
@@ -307,6 +529,10 @@ def index_direct_media(
         if stop_event.is_set():
             raise Stopped
         target_id = get_or_create_media_target(database, target)
+        with database:
+            _adopt_compatible_media_state(
+                database, target_id, year, target_config, signature, state_signature
+            )
         state = database.execute(
             """
             SELECT resume_key,complete,seen,error_id FROM media_index_state
@@ -316,7 +542,36 @@ def index_direct_media(
         ).fetchone()
         if state and state["complete"]:
             completed += len(default_windows)
+            if callback:
+                callback(ProgressEvent("media_index", f"Already indexed selected media for {target} in {year}", completed, total))
             continue
+
+        # If the normal site index is already complete, media discovery is a
+        # local SQLite filter rather than another network-wide CDX traversal.
+        if target in config.targets:
+            with database:
+                reused, reused_seen, reused_changed = _reuse_completed_main_index(
+                    target_config,
+                    database,
+                    target,
+                    target_id,
+                    year,
+                    signature,
+                    state_signature,
+                )
+            if reused:
+                completed += len(default_windows)
+                if callback:
+                    callback(
+                        ProgressEvent(
+                            "media_index",
+                            f"Reused the completed site index for {target} {year}: checked {reused_seen:,}, stored {reused_changed:,} media captures without another CDX request.",
+                            completed,
+                            total,
+                        )
+                    )
+                continue
+
         seen = int(state["seen"] or 0) if state else 0
         error_id = int(state["error_id"]) if state and state["error_id"] else None
         plan = decode_plan(state["resume_key"] if state else None, default_windows)
@@ -329,16 +584,142 @@ def index_direct_media(
                     _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                 raise Stopped
             current = plan.pending[0]
+            _resolve_media_strategy(current, target_config, target)
             label = window_label(current.start, current.end)
+            detail = (
+                f"pages {current.page:,}/{current.page_count:,}; {len(current.retry_pages)} retry"
+                if current.strategy == "paged" and current.page_count >= 0
+                else current.strategy
+            )
             if callback:
-                callback(ProgressEvent("media_index", f"Indexing all selected media for {target} during {label} ({current.strategy})", completed, total))
+                callback(ProgressEvent("media_index", f"Indexing all selected media for {target} during {label} ({detail})", completed, total))
+            request_started = time.monotonic()
             try:
-                rows, finished = _request_media_window(target_config, client, target, current, extensions)
-                accepted: list[tuple[dict[str, str], str, str]] = []
-                for row in rows:
-                    allowed, kind, actual_extension = allowed_media_url(row["original"], media, row.get("mimetype", ""))
-                    if allowed and kind:
-                        accepted.append((row, kind, actual_extension))
+                if current.strategy == "paged":
+                    batch = _request_media_paged_batch(
+                        target_config, client, target, current, extensions, stop_event
+                    )
+                    request_seconds = time.monotonic() - request_started
+                    successes = batch.successful
+                    failures = batch.failed
+                    received = 0
+                    accepted_count = 0
+                    changed = 0
+                    write_started = time.monotonic()
+                    with database:
+                        for result in successes:
+                            received += len(result.rows)
+                            accepted = _accept_media_rows(result.rows, media)
+                            accepted_count += len(accepted)
+                            changed += upsert_media_captures(database, accepted, target_id, signature)
+                        seen += received
+                        if successes:
+                            current.failures = 0
+                        if batch.finished:
+                            plan.pending.pop(0)
+                            plan.completed += 1
+                            completed += 1
+                        complete = not plan.pending
+                        _save_media_state(
+                            database,
+                            target_id,
+                            year,
+                            state_signature,
+                            encode_plan(plan),
+                            complete,
+                            seen,
+                            None if complete else error_id,
+                        )
+                        if error_id and not failures:
+                            database.execute("UPDATE errors SET resolved=1,last_seen=? WHERE id=?", (utc_now(), error_id))
+                            error_id = None
+                    write_seconds = time.monotonic() - write_started
+                    if callback:
+                        callback(
+                            ProgressEvent(
+                                "media_index",
+                                f"{target} {label}: {len(successes)}/{len(batch.requested_pages)} pages, received {received:,}, accepted {accepted_count:,}, stored {changed:,} — network {request_seconds:.1f}s, database {write_seconds:.2f}s",
+                                completed,
+                                total,
+                            )
+                        )
+                    if not failures:
+                        continue
+
+                    failure_exc = _media_failure_error(failures)
+                    if max(current.page_failures.values(), default=0) >= 2:
+                        current.strategy = "resume"
+                        current.pagination_supported = False
+                        current.page = 0
+                        current.page_count = -1
+                        current.resume_key = None
+                        current.retry_pages.clear()
+                        current.page_failures.clear()
+                        current.failures = 0
+                        current.page_size = max(100, target_config.page_size // 2)
+                        parts = split_window(current)
+                        if parts:
+                            for part in parts:
+                                part.strategy = "resume"
+                                part.pagination_supported = False
+                            plan.pending[0:1] = parts
+                            added = len(parts) - 1
+                            plan.planned += added
+                            total += added
+                        with database:
+                            error_id = record_error(
+                                database,
+                                "media_index",
+                                "slow_media_page_fallback",
+                                f"{target} {label}: one combined-media CDX page failed repeatedly; switching the saved window to smaller resume-key work.",
+                                retryable=True,
+                            )
+                            _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
+                        if callback:
+                            callback(ProgressEvent("media_index", f"One combined-media CDX page remained slow for {target} {label}; successful pages were kept and the remaining range was converted to smaller resumable windows.", completed, total))
+                        continue
+                    if not successes and _pagination_unavailable(failure_exc):
+                        current.pagination_supported = False
+                        current.strategy = "resume"
+                        current.page = 0
+                        current.page_count = -1
+                        current.retry_pages.clear()
+                        current.page_failures.clear()
+                        with database:
+                            _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
+                        continue
+                    permanent = next(
+                        (item.error for item in failures if item.error and _permanent_media_page_error(item.error)),
+                        None,
+                    )
+                    if permanent is not None:
+                        raise permanent
+                    with database:
+                        error_id = record_error(
+                            database,
+                            "media_index",
+                            "transient_media_page_retry",
+                            f"{target} {label}: {len(failures)} media CDX page(s) requeued: {failure_exc}",
+                            retryable=True,
+                        )
+                        _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
+                    if successes:
+                        if callback:
+                            callback(ProgressEvent("media_index", f"Requeued {len(failures)} slow media page(s) while continuing with untouched pages.", completed, total))
+                        continue
+                    error_id = _defer_media_window(
+                        target_config, database, plan, current, target_id, year, state_signature,
+                        seen, error_id, target, label, failure_exc, completed, total,
+                        stop_event, callback,
+                    )
+                    continue
+
+                rows, finished = _request_media_resume(
+                    target_config, client, target, current, extensions
+                )
+                request_seconds = time.monotonic() - request_started
+                accepted = _accept_media_rows(rows, media)
+                write_started = time.monotonic()
                 with database:
                     changed = upsert_media_captures(database, accepted, target_id, signature)
                     seen += len(rows)
@@ -352,13 +733,42 @@ def index_direct_media(
                     if error_id:
                         database.execute("UPDATE errors SET resolved=1,last_seen=? WHERE id=?", (utc_now(), error_id))
                         error_id = None
+                write_seconds = time.monotonic() - write_started
                 if callback:
-                    callback(ProgressEvent("media_index", f"{target} {label}: received {len(rows):,}, accepted {len(accepted):,}, stored {changed:,}", completed, total))
+                    callback(
+                        ProgressEvent(
+                            "media_index",
+                            f"{target} {label}: received {len(rows):,}, accepted {len(accepted):,}, stored {changed:,} — network {request_seconds:.1f}s, database {write_seconds:.2f}s",
+                            completed,
+                            total,
+                        )
+                    )
             except Stopped:
                 with database:
                     _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                 raise
             except (RateLimitDeferred, TransientRequestError) as exc:
+                if current.strategy == "paged" and current.page_count < 0:
+                    current.strategy = "resume"
+                    current.pagination_supported = False
+                    current.page = 0
+                    current.page_count = -1
+                    current.retry_pages.clear()
+                    current.page_failures.clear()
+                    parts = split_window(current) if getattr(exc, "splittable", False) else []
+                    if parts:
+                        for part in parts:
+                            part.strategy = "resume"
+                            part.pagination_supported = False
+                        plan.pending[0:1] = parts
+                        added = len(parts) - 1
+                        plan.planned += added
+                        total += added
+                    with database:
+                        _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
+                    if callback:
+                        callback(ProgressEvent("media_index", f"Paged CDX could not count media for {target} {label}; continuing with resumable smaller windows.", completed, total))
+                    continue
                 if current.strategy != "paged" and current.pagination_supported:
                     parts = split_window(current) if getattr(exc, "splittable", False) else []
                     if parts:
@@ -375,18 +785,25 @@ def index_direct_media(
                     current.page = 0
                     current.page_count = -1
                     current.resume_key = None
+                    current.retry_pages.clear()
+                    current.page_failures.clear()
                     with database:
                         _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                     if callback:
                         callback(ProgressEvent("media_index", f"Switching the combined media window to paged CDX indexing for {target} {label}.", completed, total))
                     continue
-                error_id = _defer_media_window(target_config, database, plan, current, target_id, year, state_signature, seen, error_id, target, label, exc, completed, total, stop_event, callback)
+                error_id = _defer_media_window(
+                    target_config, database, plan, current, target_id, year, state_signature,
+                    seen, error_id, target, label, exc, completed, total, stop_event, callback,
+                )
             except RuntimeError as exc:
-                if current.strategy == "paged" and ("HTTP 400" in str(exc) or "page-count" in str(exc)):
+                if current.strategy == "paged" and _pagination_unavailable(exc):
                     current.pagination_supported = False
                     current.strategy = "resume"
                     current.page = 0
                     current.page_count = -1
+                    current.retry_pages.clear()
+                    current.page_failures.clear()
                     with database:
                         _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                     continue
@@ -395,7 +812,10 @@ def index_direct_media(
                     _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                 raise
             except Exception as exc:
-                error_id = _defer_media_window(target_config, database, plan, current, target_id, year, state_signature, seen, error_id, target, label, exc, completed, total, stop_event, callback)
+                error_id = _defer_media_window(
+                    target_config, database, plan, current, target_id, year, state_signature,
+                    seen, error_id, target, label, exc, completed, total, stop_event, callback,
+                )
 
 
 def index_embedded_media(
@@ -433,7 +853,11 @@ def index_embedded_media(
         if callback:
             callback(ProgressEvent("media_embed", f"Looking up embedded media {index:,}/{total:,}", index, total))
         try:
-            payload = client.get_json_any(cdx_endpoints(config), build_media_params(config, link, config.from_date, config.to_date, exact=True))
+            payload = client.get_cdx_any(
+                cdx_endpoints(config),
+                build_media_params(config, link, config.from_date, config.to_date, exact=True),
+                prefer_text=True,
+            )
         except (TransientRequestError, RateLimitDeferred) as exc:
             with database:
                 record_error(database, "media_embed", "transient_embed_lookup", f"{link}: {exc}", document_id=document_id, retryable=True)
@@ -487,14 +911,14 @@ def index_media(
 
     client = HttpClient(
         limiter,
-        min(config.retries, 2),
-        min(max(config.read_timeout, 20.0), 90.0),
+        1,
+        min(max(config.read_timeout, 30.0), 120.0),
         config.user_agent,
         stop_event,
         retry_callback=on_retry,
         connect_timeout=min(max(config.connect_timeout, 5.0), 45.0),
-        read_timeout=min(max(config.read_timeout, 20.0), 90.0),
-        pool_size=2,
+        read_timeout=min(max(config.read_timeout, 30.0), 120.0),
+        pool_size=config.network.normalized().cdx_workers,
         host_gate=host_gate,
         rate_limit_attempts=0,
         rate_limit_max_wait=0,

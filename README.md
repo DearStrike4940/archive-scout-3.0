@@ -2,28 +2,37 @@
 
 Archive Scout is a cross-platform desktop research application for indexing public Wayback Machine captures, downloading archived pages and media, searching saved material, reconstructing forums, recovering legacy embeds, comparing snapshots, and reviewing large archive projects.
 
-Archive Scout 3.0 Beta 1.1 is the first Beta 1 reliability hotfix. It preserves the Alpha 4/Beta 1 feature set while repairing malformed CDX response recovery and the combined media-index path. It uses database schema version 5 and can migrate projects created by earlier Archive Scout 2.0 releases.
+Archive Scout 3.0 Beta 1.2 is the indexing-performance release. It preserves the complete Alpha 4/Beta 1 feature set, the Beta 1.1 CDX/media fixes, and database schema version 5 while replacing the slow serial broad-index path with bounded parallel CDX page retrieval.
 
 One repository produces builds for Windows x64, Linux x64, and universal macOS for Intel and Apple Silicon.
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.2/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.2/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.2/ArchiveScout-macOS-Universal.zip)
+- [Download for Windows x64](../../releases/latest/download/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](../../releases/latest/download/ArchiveScout-Linux-x64.tar.gz)
+- [Download for macOS Intel and Apple Silicon](../../releases/latest/download/ArchiveScout-macOS-Universal.zip)
 
 ### macOS installation
 
 Extract the ZIP, drag `Archive Scout.app` into `/Applications`, and launch the installed copy. Quit Archive Scout completely before replacing it with a newer release. Do not move, rename, delete, or overwrite the `.app` while it is running.
 
-## Beta 1.1 reliability hotfix
+## Beta 1.2 indexing-performance patch
 
-Beta 1.1 repairs two issues found during live testing:
+Beta 1.2 was rebuilt after reviewing the supplied Wayback Machine Downloader archive engine rather than only its interface wrapper. The useful speed principles were retained and adapted to Archive Scout's resumable project database:
 
-- A successful HTTP 200 CDX response could contain incomplete or malformed JSON. Archive Scout now treats that as transient, retries the same query as uncompressed line-oriented CDX data, and only then rotates endpoints or subdivides the saved window. It no longer exposes a JSON decoder traceback as a permanent project failure.
-- The combined media filter used an invalid field prefix and could also send wildcard targets literally beside an explicit `matchType`. Beta 1.1 uses the documented `original:regex` filter form, normalizes explicit media targets, recognizes legacy `&ref=` URL suffixes, and reruns media indexing under a new media-index state revision.
+- Broad paged targets use one yearly CDX page queue instead of twelve serial month queues and twelve page-count requests.
+- Up to six independent CDX pages are kept in flight while one shared fixed limiter caps starts at the default 80 requests per minute.
+- Each page requests six CDX blocks by default, reducing the number of round trips without creating unbounded responses.
+- Bulk pages request line-oriented text first. This avoids constructing and decoding very large JSON arrays and retains the Beta 1.1 malformed-response fallback.
+- Successful pages are committed together in one SQLite transaction; a slow page is requeued without repeating successful sibling pages.
+- If one page remains slow twice, successful page data is retained and only that saved range is converted to smaller resume-key windows instead of holding the yearly queue hostage.
+- Page number, failed-page queue, failure count, and completed work are persisted for exact Resume behavior.
+- A read timeout no longer repeats the same long wait through every HTTP backend and every CDX endpoint.
+- CDX page requests are attempted once before returning to the persistent saved queue; recovery no longer waits through a duplicate full-timeout retry of the same expensive request.
+- If a page-count request itself cannot complete, Archive Scout switches that window to resume-key retrieval and smaller saved intervals instead of looping forever.
+- Media indexing uses the same parallel page engine. When the normal site index is already complete, media rows are filtered from SQLite locally and no second CDX traversal is made.
 
-The media pass remains combined: it does not create one CDX index per extension. After updating from Beta 1, run **Index and download selected media** or **Index media URLs only** once so the corrected media-index state revision is used.
+New projects use 25,000-row resume pages, six CDX page blocks, six page workers, and 0.75-second request spacing. Existing Beta 1 projects using the original defaults are migrated automatically, and compatible completed index states are adopted rather than discarded solely because the transport page size changed.
 
 ## What changed in Archive Scout 3.0 Beta 1
 
@@ -153,6 +162,7 @@ The Settings page provides:
 Network backend: Automatic, httpx, urllib3, or curl
 CDX endpoint: Automatic, standard CDX, or timemap
 Index strategy: Automatic, paged, or resume key
+Parallel CDX page requests
 CDX page blocks
 Use operating-system proxy and certificate environment
 Persistent recovery
@@ -168,13 +178,13 @@ Network backend: Automatic
 CDX endpoint: Automatic
 Index strategy: Automatic
 Workers: 4
-CDX request delay: 1.0 second
+CDX request delay: 0.75 second
 Download request delay: 0.5 seconds
 Persistent recovery: Enabled
 Failures before graceful pause: 8
 ```
 
-For a broad target such as `example.com/*`, Automatic mode prefers paged CDX retrieval. For an exact URL, it prefers resume-key retrieval. Do not add a very large worker count to compensate for a slow CDX query; CDX indexing is intentionally resumable and controlled separately from concurrent page downloads.
+For a broad target such as `example.com/*`, Automatic mode prefers a yearly paged CDX queue with bounded parallel page requests. For an exact URL, it prefers resume-key retrieval. The shared request-spacing control still limits how quickly requests begin, so raising page concurrency improves latency hiding rather than creating an uncontrolled request burst.
 
 See [Archive Scout 3.0 network architecture](docs/ARCHIVE_SCOUT_3_NETWORK.md), [resilient indexing](docs/RESILIENT_INDEXING.md), and [network performance](docs/NETWORK_PERFORMANCE.md).
 
@@ -368,13 +378,13 @@ Each package has a corresponding `.sha256` file.
 ## Current limitations
 
 - A network, DNS, proxy, firewall, or Wayback outage can still make progress impossible. Archive Scout now pauses and preserves the exact queue instead of treating repeated contact failure as successful work or looping aggressively.
-- The actual archive engine imported by the separately supplied Wayback Machine Downloader was not included with its visible scripts, so Archive Scout does not claim byte-for-byte parity with unseen code.
+- The supplied downloader engine was reviewed in full for this patch. Archive Scout intentionally does not copy its very large task batches or optional machine-learning dependency stack; it keeps bounded queues and cross-platform packaging safeguards.
 - Forum parsing is heuristic and may need site-specific improvements.
 - External embedded-asset recovery is disabled by default and requires an explicit allowlist.
 - The applications are not commercially signed or notarized, so Windows and macOS may display first-launch security warnings.
 
 ## Release status
 
-`3.0.0-beta.1.1` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
+`3.0.0-beta.1.2` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
 
 See [CHANGELOG.md](CHANGELOG.md), [ROADMAP.md](ROADMAP.md), and [SOURCE_VALIDATION.txt](SOURCE_VALIDATION.txt).

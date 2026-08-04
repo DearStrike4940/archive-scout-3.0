@@ -115,6 +115,9 @@ class HttpClient:
         self.host_gate = host_gate or SharedHostGate()
         self.rate_limit_attempts = max(0, int(rate_limit_attempts))
         self.rate_limit_max_wait = max(0.0, float(rate_limit_max_wait))
+        self.endpoint_lock = threading.Lock()
+        self.endpoint_last_success: str | None = None
+        self.endpoint_cooldown_until: dict[str, float] = {}
         self.transport = transport or ResilientTransport(
             pool_size=max(1, int(pool_size)),
             connect_timeout=self.connect_timeout,
@@ -134,9 +137,6 @@ class HttpClient:
             "Accept-Encoding": "gzip, deflate",
             "Connection": "keep-alive",
             "Accept-Language": "en-US,en;q=0.8",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "DNT": "1",
         }
         ensure_frozen_bundle_available()
         generic_attempt = 0
@@ -241,47 +241,96 @@ class HttpClient:
     def get_json(self, url: str, params: list[tuple[str, str]], max_bytes: int = 64 * 1024 * 1024) -> object:
         return self.get_json_any((url,), params, max_bytes=max_bytes)
 
-    def get_json_any(
+    def _ordered_endpoints(self, urls: Iterable[str]) -> list[str]:
+        endpoints = list(dict.fromkeys(str(url) for url in urls if str(url).strip()))
+        now = time.monotonic()
+        with self.endpoint_lock:
+            preferred = self.endpoint_last_success
+            active = [url for url in endpoints if self.endpoint_cooldown_until.get(url, 0.0) <= now]
+        if not active:
+            active = endpoints
+        if preferred in active:
+            active.remove(preferred)
+            active.insert(0, preferred)
+        return active
+
+    def _remember_endpoint_success(self, endpoint: str) -> None:
+        with self.endpoint_lock:
+            self.endpoint_last_success = endpoint
+            self.endpoint_cooldown_until.pop(endpoint, None)
+
+    def _remember_endpoint_failure(self, endpoint: str) -> None:
+        with self.endpoint_lock:
+            self.endpoint_cooldown_until[endpoint] = time.monotonic() + 20.0
+
+    def get_cdx_any(
         self,
         urls: Iterable[str],
         params: list[tuple[str, str]],
         max_bytes: int = 64 * 1024 * 1024,
+        *,
+        prefer_text: bool = False,
     ) -> object:
-        endpoints = list(dict.fromkeys(str(url) for url in urls if str(url).strip()))
+        endpoints = self._ordered_endpoints(urls)
         if not endpoints:
             raise ValueError("at least one endpoint is required")
         failures: list[tuple[str, TransientRequestError]] = []
+        text_params = cdx_text_fallback_params(params)
+
         for endpoint in endpoints:
-            full_url = endpoint + "?" + urllib.parse.urlencode(params, doseq=True)
-            try:
-                response = self.get(full_url, max_bytes, "application/json,text/plain,*/*")
-                return parse_json_response(response["data"], endpoint)
-            except MalformedCDXResponse as json_exc:
-                if self.retry_callback:
-                    self.retry_callback(
-                        1,
-                        1,
-                        "CDX JSON was incomplete or malformed; retrying the same result as uncompressed line data",
-                        0.0,
-                    )
-                fallback_params = cdx_text_fallback_params(params)
-                fallback_url = endpoint + "?" + urllib.parse.urlencode(fallback_params, doseq=True)
+            attempts = ("text", "json") if prefer_text else ("json", "text")
+            first_error: BaseException | None = None
+            for format_name in attempts:
+                request_params = text_params if format_name == "text" else params
+                full_url = endpoint + "?" + urllib.parse.urlencode(request_params, doseq=True)
                 try:
-                    response = self.get(fallback_url, max_bytes, "text/plain,*/*")
-                    return parse_cdx_text_response(response["data"], endpoint, fallback_params)
-                except (TransientRequestError, RuntimeError) as fallback_exc:
-                    combined = MalformedCDXResponse(
-                        f"CDX JSON and plain-text fallback were both unusable at {endpoint}: "
-                        f"JSON: {json_exc}; text: {fallback_exc}",
-                        splittable=True,
-                        endpoint=endpoint,
-                    )
-                    failures.append((endpoint, combined))
-            except TransientRequestError as exc:
-                exc.endpoint = endpoint
-                failures.append((endpoint, exc))
+                    accept = "text/plain,*/*" if format_name == "text" else "application/json,text/plain,*/*"
+                    response = self.get(full_url, max_bytes, accept)
+                    if format_name == "text":
+                        payload = parse_cdx_text_response(response["data"], endpoint, request_params)
+                    else:
+                        payload = parse_json_response(response["data"], endpoint)
+                    self._remember_endpoint_success(endpoint)
+                    return payload
+                except MalformedCDXResponse as exc:
+                    first_error = first_error or exc
+                    if self.retry_callback:
+                        other = "JSON" if format_name == "text" else "line-oriented text"
+                        self.retry_callback(1, 1, f"CDX {format_name} response was incomplete; retrying as {other}", 0.0)
+                    continue
+                except TransientRequestError as exc:
+                    first_error = first_error or exc
+                    # A read timeout means Wayback accepted the request but did
+                    # not finish the body. Repeating the same expensive query
+                    # against every endpoint multiplies the stall; let the page
+                    # queue requeue or subdivide it immediately instead.
+                    if exc.timed_out:
+                        self._remember_endpoint_failure(endpoint)
+                        exc.endpoint = endpoint
+                        raise
+                    # Other transient failures may be endpoint-specific, so try
+                    # the next service without reissuing another representation.
+                    break
+                except RuntimeError as exc:
+                    if str(exc).startswith("HTTP ") or str(exc).startswith("response exceeds"):
+                        raise
+                    first_error = first_error or exc
+                    continue
+
+            self._remember_endpoint_failure(endpoint)
+            if isinstance(first_error, TransientRequestError):
+                failure = first_error
+            else:
+                failure = MalformedCDXResponse(
+                    f"CDX response was unusable at {endpoint}: {first_error}",
+                    splittable=True,
+                    endpoint=endpoint,
+                )
+            failure.endpoint = endpoint
+            failures.append((endpoint, failure))
             if self.retry_callback and len(endpoints) > 1:
                 self.retry_callback(1, len(endpoints), f"Endpoint unavailable: {endpoint}; trying alternate CDX service", 0.0)
+
         timed_out = any(exc.timed_out for _, exc in failures)
         splittable = any(exc.splittable for _, exc in failures)
         summary = "; ".join(f"{endpoint}: {exc}" for endpoint, exc in failures)
@@ -290,6 +339,14 @@ class HttpClient:
             timed_out=timed_out,
             splittable=splittable or timed_out,
         ) from (failures[-1][1] if failures else None)
+
+    def get_json_any(
+        self,
+        urls: Iterable[str],
+        params: list[tuple[str, str]],
+        max_bytes: int = 64 * 1024 * 1024,
+    ) -> object:
+        return self.get_cdx_any(urls, params, max_bytes=max_bytes, prefer_text=False)
 
     def retry_wait(self, attempt: int, reason: str, retry_after: float | None = None) -> None:
         base = max(float(retry_after or 0), min(120.0, 2**attempt))

@@ -146,11 +146,11 @@ class ArchiveScoutApp(tk.Tk):
         self.cdx_match_type_var = tk.StringVar(value="Automatic")
         self.collapse_urlkey_var = tk.BooleanVar(value=True)
         self.collapse_digest_var = tk.BooleanVar(value=False)
-        self.page_size_var = tk.StringVar(value="5000")
+        self.page_size_var = tk.StringVar(value="25000")
         self.workers_var = tk.StringVar(value=str(min(4, max(2, cpu_count))))
         self.max_file_var = tk.StringVar(value="25")
         self.minimum_score_var = tk.StringVar(value="1")
-        self.cdx_delay_var = tk.StringVar(value="1.0")
+        self.cdx_delay_var = tk.StringVar(value="0.75")
         self.download_delay_var = tk.StringVar(value="0.5")
         self.rate_limit_base_var = tk.StringVar(value="30")
         self.rate_limit_max_var = tk.StringVar(value="300")
@@ -163,7 +163,8 @@ class ArchiveScoutApp(tk.Tk):
         self.network_backend_var = tk.StringVar(value="auto")
         self.network_endpoint_var = tk.StringVar(value="auto")
         self.network_strategy_var = tk.StringVar(value="auto")
-        self.network_page_blocks_var = tk.StringVar(value="1")
+        self.network_page_blocks_var = tk.StringVar(value="6")
+        self.network_cdx_workers_var = tk.StringVar(value=str(min(6, max(2, cpu_count))))
         self.network_trust_env_var = tk.BooleanVar(value=True)
         self.network_persistent_var = tk.BooleanVar(value=True)
         self.network_retry_base_var = tk.StringVar(value="5")
@@ -709,6 +710,7 @@ class ArchiveScoutApp(tk.Tk):
             ttk.Label(tab, text=label + ":").grid(row=row, column=2, sticky="w", pady=4)
             ttk.Combobox(tab, textvariable=variable, values=values, state="readonly", width=18).grid(row=row, column=3, sticky="w", padx=(10, 0), pady=4)
         numeric = [
+            ("Parallel CDX page requests", self.network_cdx_workers_var),
             ("CDX page blocks", self.network_page_blocks_var),
             ("Retry base (seconds)", self.network_retry_base_var),
             ("Retry ceiling (seconds)", self.network_retry_max_var),
@@ -717,27 +719,27 @@ class ArchiveScoutApp(tk.Tk):
         for offset, (label, variable) in enumerate(numeric, start=4):
             ttk.Label(tab, text=label + ":").grid(row=offset, column=2, sticky="w", pady=4)
             ttk.Entry(tab, textvariable=variable, width=18).grid(row=offset, column=3, sticky="w", padx=(10, 0), pady=4)
-        ttk.Checkbutton(tab, text="Honor system proxy and certificate environment", variable=self.network_trust_env_var).grid(row=8, column=2, columnspan=2, sticky="w", pady=4)
-        ttk.Checkbutton(tab, text="Keep retrying recoverable windows during this run", variable=self.network_persistent_var).grid(row=9, column=2, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(tab, text="Honor system proxy and certificate environment", variable=self.network_trust_env_var).grid(row=9, column=2, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(tab, text="Keep retrying recoverable windows during this run", variable=self.network_persistent_var).grid(row=10, column=2, columnspan=2, sticky="w", pady=4)
         ttk.Label(
             tab,
-            text="Auto uses a persistent HTTPX pool, then an independent urllib3 stack, then the operating system curl client. Broad CDX queries use paged index access first. Repeated failures are saved and gracefully paused instead of producing a traceback or a tight retry loop.",
+            text="Auto uses persistent pooled connections and independent fallback stacks. Broad CDX targets use yearly page queues, bounded parallel page retrieval, text-first responses, and exact failed-page resume. Repeated failures are saved and gracefully paused instead of producing a traceback or a tight retry loop.",
             wraplength=520,
             style="Muted.TLabel",
-        ).grid(row=10, column=2, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=11, column=2, columnspan=2, sticky="w", pady=(8, 0))
 
         separator = ttk.Separator(tab, orient="horizontal")
-        separator.grid(row=11, column=0, columnspan=4, sticky="ew", pady=14)
-        ttk.Label(tab, text="Interface and project safety", style="Section.TLabel").grid(row=12, column=0, columnspan=4, sticky="w")
-        ttk.Label(tab, text="Font scale:").grid(row=13, column=0, sticky="w", pady=4)
+        separator.grid(row=12, column=0, columnspan=4, sticky="ew", pady=14)
+        ttk.Label(tab, text="Interface and project safety", style="Section.TLabel").grid(row=13, column=0, columnspan=4, sticky="w")
+        ttk.Label(tab, text="Font scale:").grid(row=14, column=0, sticky="w", pady=4)
         font_entry = ttk.Entry(tab, textvariable=self.font_scale_var, width=18)
-        font_entry.grid(row=13, column=1, sticky="w", padx=(10, 24), pady=4)
-        ttk.Button(tab, text="Apply scale", command=self.apply_interface_theme).grid(row=13, column=1, sticky="e", padx=(0, 24))
-        ttk.Checkbutton(tab, text="Create automatic safety backups", variable=self.auto_backup_var).grid(row=14, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Label(tab, text="Backups to keep:").grid(row=15, column=0, sticky="w", pady=4)
-        ttk.Entry(tab, textvariable=self.backup_keep_var, width=18).grid(row=15, column=1, sticky="w", padx=(10, 24), pady=4)
-        ttk.Label(tab, text="Import existing archive folder:").grid(row=13, column=2, sticky="w", pady=4)
-        ttk.Entry(tab, textvariable=self.import_source_var).grid(row=13, column=3, sticky="ew", padx=(10, 0), pady=4)
+        font_entry.grid(row=14, column=1, sticky="w", padx=(10, 24), pady=4)
+        ttk.Button(tab, text="Apply scale", command=self.apply_interface_theme).grid(row=14, column=1, sticky="e", padx=(0, 24))
+        ttk.Checkbutton(tab, text="Create automatic safety backups", variable=self.auto_backup_var).grid(row=15, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Label(tab, text="Backups to keep:").grid(row=16, column=0, sticky="w", pady=4)
+        ttk.Entry(tab, textvariable=self.backup_keep_var, width=18).grid(row=16, column=1, sticky="w", padx=(10, 24), pady=4)
+        ttk.Label(tab, text="Import existing archive folder:").grid(row=14, column=2, sticky="w", pady=4)
+        ttk.Entry(tab, textvariable=self.import_source_var).grid(row=14, column=3, sticky="ew", padx=(10, 0), pady=4)
         ttk.Button(tab, text="Browse…", command=self.choose_import_source).grid(row=14, column=3, sticky="w", padx=(10, 0))
         ttk.Label(tab, text="Choose ‘Import an existing archive folder’ from Operation after selecting a source.", style="Muted.TLabel", wraplength=460).grid(row=15, column=2, columnspan=2, sticky="w")
 
@@ -1012,6 +1014,7 @@ class ArchiveScoutApp(tk.Tk):
                 endpoint_mode=self.network_endpoint_var.get(),
                 index_strategy=self.network_strategy_var.get(),
                 page_blocks=int(self.network_page_blocks_var.get()),
+                cdx_workers=int(self.network_cdx_workers_var.get()),
                 persistent_retries=self.network_persistent_var.get(),
                 retry_base_seconds=float(self.network_retry_base_var.get()),
                 retry_max_seconds=float(self.network_retry_max_var.get()),
@@ -1571,6 +1574,7 @@ class ArchiveScoutApp(tk.Tk):
         self.network_endpoint_var.set(network.endpoint_mode)
         self.network_strategy_var.set(network.index_strategy)
         self.network_page_blocks_var.set(str(network.page_blocks))
+        self.network_cdx_workers_var.set(str(network.cdx_workers))
         self.network_trust_env_var.set(network.trust_environment)
         self.network_persistent_var.set(network.persistent_retries)
         self.network_retry_base_var.set(str(network.retry_base_seconds))

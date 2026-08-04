@@ -1,28 +1,28 @@
-Archive Scout 3.0.0-beta.1.1 source validation
+Archive Scout 3.0.0-beta.1.2 source validation
 
 Completed locally before packaging:
-- 75 unit, migration, and integration tests passed
+- 85 unit, migration, and integration tests passed
+- one display-dependent interface test was skipped in the normal headless run and passed separately under Xvfb
 - python -m compileall completed for archive_scout and tests
-- malformed valid-looking CDX JSON was converted into a splittable transient response
-- automatic JSON-to-uncompressed-text fallback parsed CDX rows, resume keys, literal-space URLs, and page counts
-- the corrected combined media filter used one `original:regex` expression for every selected extension
-- explicit prefix media targets were normalized without a literal wildcard
-- legacy `.jpg&ref=...` and query-value media extensions were recognized
-- extensionless Flash MIME captures were classified as video media
-- all previous schema, transport, paging, retry, analysis, merge, backup, repair, and interface tests remained passing
-- both GitHub workflow YAML files parsed successfully
-- Linux and macOS build scripts passed shell syntax validation
+- both GitHub workflow files parsed as YAML and all Linux/macOS shell scripts passed bash syntax validation
+- broad paged targets used one yearly page queue instead of twelve monthly page-count cycles
+- bounded parallel page retrieval overlapped requests without exceeding the configured worker count
+- one failed CDX page was requeued while successful sibling pages remained committed
+- a repeatedly slow individual page was converted to smaller resume-key windows while previously successful page data stayed committed
+- a page-count timeout switched to smaller resumable windows instead of repeating the same count forever
+- bulk page retrieval requested line-oriented text before JSON
+- a read timeout stopped after one endpoint/backend path and returned to the saved page queue
+- CDX page requests used one immediate network attempt before handing recovery back to the persistent page/window queue
+- compatible Beta 1 index state was adopted across old page-size defaults
+- media indexing reused a completed normal site index without a network request
+- combined media indexing still used one extension regex rather than one query per extension
+- SQLite WAL, cache, memory-map, temp-store, checkpoint, and busy-timeout settings were enabled
+- malformed-CDX, 429, schema migration, analysis, merge, backup, repair, and packaging regression tests remained passing
 
-Not completed locally:
+Still required or not available locally:
 - no live Internet Archive stress test was performed
-- the exact user response body that failed at line 3742 was not available in full
+- no reliable wall-clock speed guarantee can be made for every target or network
 - no real corporate proxy, antivirus interception, or restrictive Windows firewall environment was available
 - native Windows, Linux, and universal macOS packages were not built in this container
-
-Still required on GitHub and real machines:
-- Tests workflow on Windows, Linux, and macOS
-- Build All Platforms workflow
-- smoke test each packaged application
-- rerun a live index that previously produced malformed CDX JSON
-- run a corrected combined media index and verify media downloads
-- test at least one Windows network that previously produced repeated CDX contact failures
+- GitHub Actions must run the cross-platform matrix and build workflows
+- each packaged application should be smoke-tested on real hardware

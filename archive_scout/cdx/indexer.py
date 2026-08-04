@@ -6,7 +6,7 @@ import random
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable
 
@@ -16,12 +16,15 @@ from ..downloads.rate_limit import FixedRateLimiter, SharedHostGate
 from ..events import ConnectivityPaused, ProgressEvent, Stopped
 from ..utils import utc_now
 from .client import HttpClient, RateLimitDeferred, TransientRequestError, is_timeout_error
+from .parallel import PageFetchResult, fetch_cdx_pages
 from .parameters import (
     build_cdx_params,
     build_num_pages_params,
     build_paged_cdx_params,
     cdx_endpoints,
     cdx_query_signature,
+    cdx_query_signatures,
+    cdx_year_window,
     parse_cdx,
     parse_num_pages,
     preferred_index_strategy,
@@ -40,6 +43,8 @@ class PendingWindow:
     page_count: int = -1
     page_blocks: int = 0
     pagination_supported: bool = True
+    retry_pages: list[int] = field(default_factory=list)
+    page_failures: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -47,6 +52,21 @@ class IndexPlan:
     pending: list[PendingWindow]
     completed: int
     planned: int
+
+
+@dataclass(slots=True)
+class PagedBatch:
+    results: list[PageFetchResult]
+    requested_pages: list[int]
+    finished: bool
+
+    @property
+    def successful(self) -> list[PageFetchResult]:
+        return [item for item in self.results if item.succeeded]
+
+    @property
+    def failed(self) -> list[PageFetchResult]:
+        return [item for item in self.results if not item.succeeded]
 
 
 def emit(callback: Callable[[ProgressEvent], None] | None, event: ProgressEvent) -> None:
@@ -63,6 +83,20 @@ def month_windows(config: ProjectConfig, year: int) -> list[tuple[str, str]]:
         if start <= end:
             windows.append((start, end))
     return windows
+
+
+def index_windows(config: ProjectConfig, target: str, year: int) -> list[tuple[str, str]]:
+    """Use one yearly window for paged indexing and months for resume indexing.
+
+    Page-number retrieval already partitions the CDX index. Repeating a page-count
+    request for every month adds substantial overhead, so broad queries use one
+    resumable yearly page queue. Narrow resume-key queries retain monthly windows
+    because those windows are useful timeout boundaries.
+    """
+    if preferred_index_strategy(config, target) == "paged":
+        window = cdx_year_window(config, year)
+        return [window] if window else []
+    return month_windows(config, year)
 
 
 def encode_resume(start: str, end: str, resume: str | None) -> str:
@@ -92,7 +126,7 @@ def encode_plan(plan: IndexPlan) -> str | None:
     if not plan.pending:
         return None
     payload = {
-        "version": 4,
+        "version": 5,
         "completed": int(plan.completed),
         "planned": int(plan.planned),
         "pending": [
@@ -107,6 +141,12 @@ def encode_plan(plan: IndexPlan) -> str | None:
                 "page_count": int(item.page_count),
                 "page_blocks": int(item.page_blocks),
                 "pagination_supported": bool(item.pagination_supported),
+                "retry_pages": sorted({int(page) for page in item.retry_pages if int(page) >= 0}),
+                "page_failures": {
+                    str(int(page)): max(0, int(count))
+                    for page, count in item.page_failures.items()
+                    if int(page) >= 0 and int(count) > 0
+                },
             }
             for item in plan.pending
         ],
@@ -119,7 +159,7 @@ def decode_plan(value: str | None, default_windows: list[tuple[str, str]]) -> In
         try:
             payload = json.loads(value)
             version = int(payload.get("version", 1))
-            if version in {2, 3, 4}:
+            if version in {2, 3, 4, 5}:
                 pending: list[PendingWindow] = []
                 for raw in payload.get("pending") or []:
                     start = str(raw["start"])
@@ -127,6 +167,13 @@ def decode_plan(value: str | None, default_windows: list[tuple[str, str]]) -> In
                     if start > end:
                         continue
                     resume = raw.get("resume_key")
+                    retry_pages = sorted({max(0, int(page)) for page in raw.get("retry_pages") or []})
+                    raw_failures = raw.get("page_failures") or {}
+                    page_failures = {
+                        max(0, int(page)): max(0, int(count))
+                        for page, count in raw_failures.items()
+                        if int(count) > 0
+                    }
                     pending.append(
                         PendingWindow(
                             start=start,
@@ -139,6 +186,8 @@ def decode_plan(value: str | None, default_windows: list[tuple[str, str]]) -> In
                             page_count=int(raw.get("page_count", -1)),
                             page_blocks=max(0, int(raw.get("page_blocks", 0))),
                             pagination_supported=bool(raw.get("pagination_supported", True)),
+                            retry_pages=retry_pages,
+                            page_failures=page_failures,
                         )
                     )
                 completed = max(0, int(payload.get("completed", 0)))
@@ -162,12 +211,13 @@ def decode_plan(value: str | None, default_windows: list[tuple[str, str]]) -> In
 
 
 def split_window(window: PendingWindow) -> list[PendingWindow]:
-    """Split a failed resume-key interval without creating unbounded work."""
     start_dt = datetime.strptime(window.start, "%Y%m%d%H%M%S")
     end_dt = datetime.strptime(window.end, "%Y%m%d%H%M%S")
     duration = end_dt - start_dt
 
-    if duration >= timedelta(days=8):
+    if duration >= timedelta(days=60):
+        chunk = timedelta(days=30)
+    elif duration >= timedelta(days=8):
         chunk = timedelta(days=7)
     elif duration >= timedelta(days=2):
         chunk = timedelta(days=1)
@@ -198,7 +248,7 @@ def split_window(window: PendingWindow) -> list[PendingWindow]:
             PendingWindow(
                 start=cursor.strftime("%Y%m%d%H%M%S"),
                 end=part_end.strftime("%Y%m%d%H%M%S"),
-                page_size=max(25, window.page_size // 2) if window.page_size else 0,
+                page_size=max(100, window.page_size // 2) if window.page_size else 0,
                 strategy=window.strategy,
                 page_blocks=max(1, window.page_blocks),
                 pagination_supported=window.pagination_supported,
@@ -221,6 +271,8 @@ def window_label(start: str, end: str) -> str:
         last_day = calendar.monthrange(start_date.year, start_date.month)[1]
         if end_date.day == last_day:
             return start_date.strftime("%Y-%m")
+    if start_date.month == 1 and start_date.day == 1 and end_date.month == 12 and end_date.day == 31:
+        return start_date.strftime("%Y")
     return f"{start_date:%Y-%m-%d}–{end_date:%Y-%m-%d}"
 
 
@@ -255,6 +307,55 @@ def save_state(
     )
 
 
+def _adopt_compatible_index_state(
+    database: sqlite3.Connection,
+    target_id: int,
+    year: int,
+    config: ProjectConfig,
+    signature: str,
+) -> None:
+    """Adopt Beta-era state whose only signature difference is page size."""
+    existing = database.execute(
+        "SELECT 1 FROM index_state WHERE target_id=? AND year=? AND query_signature=?",
+        (target_id, year, signature),
+    ).fetchone()
+    if existing:
+        return
+    start, end = cdx_year_window(config, year) or (f"{year:04d}0101000000", f"{year:04d}1231235959")
+    for candidate in cdx_query_signatures(config):
+        if candidate == signature:
+            continue
+        state = database.execute(
+            "SELECT resume_key,complete,seen,error_id,updated_at FROM index_state "
+            "WHERE target_id=? AND year=? AND query_signature=?",
+            (target_id, year, candidate),
+        ).fetchone()
+        if not state:
+            continue
+        # There is no current state row, so most updates are conflict-free.
+        # UPDATE OR IGNORE protects projects that already contain a handful of
+        # rows under both signatures after an interrupted upgrade.
+        database.execute(
+            "UPDATE OR IGNORE captures SET query_signature=? "
+            "WHERE target_id=? AND query_signature=? AND timestamp BETWEEN ? AND ?",
+            (signature, target_id, candidate, start, end),
+        )
+        database.execute(
+            "DELETE FROM captures WHERE target_id=? AND query_signature=? AND timestamp BETWEEN ? AND ?",
+            (target_id, candidate, start, end),
+        )
+        database.execute(
+            "INSERT INTO index_state(target_id,year,query_signature,resume_key,complete,seen,error_id,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (target_id, year, signature, state["resume_key"], state["complete"], state["seen"], state["error_id"], state["updated_at"]),
+        )
+        database.execute(
+            "DELETE FROM index_state WHERE target_id=? AND year=? AND query_signature=?",
+            (target_id, year, candidate),
+        )
+        return
+
+
 def _record_network_event(database: sqlite3.Connection, stage: str, message: str, details: dict | None = None) -> None:
     try:
         database.execute(
@@ -282,8 +383,9 @@ def _defer_transient_window(
     stop_event: threading.Event,
 ) -> int:
     current.failures += 1
-    current.page_size = max(25, (current.page_size or config.page_size) // 2)
-    current.page_blocks = max(1, current.page_blocks // 2)
+    current.page_size = max(100, (current.page_size or config.page_size) // 2)
+    if current.strategy != "paged":
+        current.page_blocks = max(1, current.page_blocks // 2)
     message = f"{type(exc).__name__}: {exc}"
     network = config.network.normalized()
     with database:
@@ -305,6 +407,7 @@ def _defer_transient_window(
                 "failures": current.failures,
                 "page": current.page,
                 "page_count": current.page_count,
+                "retry_pages": current.retry_pages[:100],
             },
         )
         if len(plan.pending) > 1:
@@ -321,7 +424,7 @@ def _defer_transient_window(
     threshold = network.failure_pause_threshold
     if plan.pending and all(item.failures >= threshold for item in plan.pending):
         raise ConnectivityPaused(
-            "Wayback could not answer any remaining CDX window after multiple independent connection methods. "
+            "Wayback could not answer any remaining CDX work after multiple independent connection methods. "
             "Archive Scout saved the exact queue and paused cleanly; Resume will continue from this point."
         ) from exc
 
@@ -330,7 +433,7 @@ def _defer_transient_window(
             callback,
             ProgressEvent(
                 "index",
-                f"Wayback did not answer {window_label(current.start, current.end)}. Progress was saved and this window moved behind the remaining work.",
+                f"Wayback did not answer {window_label(current.start, current.end)}. Progress was saved and this work moved behind the remaining queue.",
                 completed_windows,
                 total_windows,
             ),
@@ -364,6 +467,7 @@ def _client_for_config(
     stop_event: threading.Event,
     callback: Callable[[ProgressEvent], None] | None,
 ) -> HttpClient:
+    network = config.network.normalized()
     limiter = FixedRateLimiter(config.cdx_delay)
     host_gate = SharedHostGate(config.rate_limit_base_pause, config.rate_limit_max_pause)
 
@@ -385,19 +489,19 @@ def _client_for_config(
 
     return HttpClient(
         limiter,
-        min(config.retries, 2),
-        min(max(config.read_timeout, 20.0), 90.0),
+        1,
+        min(max(config.read_timeout, 30.0), 120.0),
         config.user_agent,
         stop_event,
         retry_callback=on_retry,
         connect_timeout=min(max(config.connect_timeout, 5.0), 45.0),
-        read_timeout=min(max(config.read_timeout, 20.0), 90.0),
-        pool_size=2,
+        read_timeout=min(max(config.read_timeout, 30.0), 120.0),
+        pool_size=network.cdx_workers,
         host_gate=host_gate,
         rate_limit_attempts=0,
         rate_limit_max_wait=0,
-        network_backend=config.network.normalized().backend,
-        trust_environment=config.network.normalized().trust_environment,
+        network_backend=network.backend,
+        trust_environment=network.trust_environment,
         network_callback=on_network,
     )
 
@@ -411,30 +515,73 @@ def _resolve_strategy(current: PendingWindow, config: ProjectConfig, target: str
         current.page_blocks = config.network.normalized().page_blocks
 
 
-def _request_paged(
+def _select_page_batch(current: PendingWindow, workers: int) -> tuple[list[int], int]:
+    workers = max(1, int(workers))
+    retry_pages = sorted({page for page in current.retry_pages if 0 <= page < current.page_count})
+    pages: list[int] = []
+    next_page = max(0, current.page)
+    new_pages_remain = next_page < current.page_count
+    retry_quota = workers if not new_pages_remain else min(len(retry_pages), max(1, workers // 2))
+    pages.extend(retry_pages[:retry_quota])
+    while len(pages) < workers and next_page < current.page_count:
+        if next_page not in retry_pages:
+            pages.append(next_page)
+        next_page += 1
+    if len(pages) < workers:
+        for page in retry_pages[retry_quota:]:
+            if page not in pages:
+                pages.append(page)
+            if len(pages) >= workers:
+                break
+    return pages, next_page
+
+
+def _request_paged_batch(
     client: HttpClient,
     config: ProjectConfig,
     target: str,
     current: PendingWindow,
-) -> tuple[list[dict[str, str]], bool]:
+    stop_event: threading.Event,
+) -> PagedBatch:
     endpoints = cdx_endpoints(config)
+    network = config.network.normalized()
     if current.page_count < 0:
-        count_payload = client.get_json_any(
+        count_payload = client.get_cdx_any(
             endpoints,
             build_num_pages_params(config, target, current.start, current.end, current.page_blocks),
             max_bytes=1024 * 1024,
+            prefer_text=True,
         )
         current.page_count = parse_num_pages(count_payload)
         current.page = min(current.page, current.page_count)
-    if current.page >= current.page_count:
-        return [], True
-    payload = client.get_json_any(
+        current.retry_pages = [page for page in current.retry_pages if page < current.page_count]
+    if current.page >= current.page_count and not current.retry_pages:
+        return PagedBatch([], [], True)
+
+    pages, next_page = _select_page_batch(current, network.cdx_workers)
+    if not pages:
+        return PagedBatch([], [], True)
+    results = fetch_cdx_pages(
+        client,
         endpoints,
-        build_paged_cdx_params(config, target, current.start, current.end, current.page, current.page_blocks),
+        pages,
+        lambda page: build_paged_cdx_params(config, target, current.start, current.end, page, current.page_blocks),
+        stop_event,
+        workers=network.cdx_workers,
+        max_bytes=max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024),
     )
-    rows, _ = parse_cdx(payload)
-    current.page += 1
-    return rows, current.page >= current.page_count
+    current.page = next_page
+    retry_set = set(current.retry_pages)
+    for result in results:
+        if result.succeeded:
+            retry_set.discard(result.page)
+            current.page_failures.pop(result.page, None)
+        else:
+            retry_set.add(result.page)
+            current.page_failures[result.page] = current.page_failures.get(result.page, 0) + 1
+    current.retry_pages = sorted(retry_set)
+    finished = current.page >= current.page_count and not current.retry_pages
+    return PagedBatch(results, pages, finished)
 
 
 def _request_resume(
@@ -444,9 +591,10 @@ def _request_resume(
     current: PendingWindow,
 ) -> tuple[list[dict[str, str]], bool]:
     page_size = current.page_size or config.page_size
-    payload = client.get_json_any(
+    payload = client.get_cdx_any(
         cdx_endpoints(config),
         build_cdx_params(config, target, current.start, current.end, current.resume_key, page_size=page_size),
+        prefer_text=True,
     )
     rows, next_resume = parse_cdx(payload)
     if next_resume:
@@ -455,6 +603,25 @@ def _request_resume(
         current.resume_key = next_resume
         return rows, False
     return rows, True
+
+
+def _paged_failure_error(failures: list[PageFetchResult]) -> BaseException:
+    if not failures:
+        return TransientRequestError("unknown paged CDX failure", splittable=False)
+    return failures[0].error or TransientRequestError("unknown paged CDX failure", splittable=False)
+
+
+def _is_pagination_unavailable(exc: BaseException) -> bool:
+    message = str(exc)
+    return isinstance(exc, RuntimeError) and ("HTTP 400" in message or "page-count" in message)
+
+
+def _is_permanent_page_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TransientRequestError, RateLimitDeferred)):
+        return False
+    if _is_pagination_unavailable(exc):
+        return False
+    return isinstance(exc, RuntimeError)
 
 
 def index_archive(
@@ -473,7 +640,7 @@ def index_archive(
         target_config = config.for_target(target)
         signature = cdx_query_signature(target_config)
         for year in range(target_config.from_year, target_config.to_year + 1):
-            windows = month_windows(target_config, year)
+            windows = index_windows(target_config, target, year)
             if windows:
                 tasks.append((target, target_config, year, windows, signature))
 
@@ -484,6 +651,8 @@ def index_archive(
             if stop_event.is_set():
                 raise Stopped
             target_id = get_or_create_target(database, target, target_config.settings_for_target(target))
+            with database:
+                _adopt_compatible_index_state(database, target_id, year, target_config, signature)
             state = database.execute(
                 "SELECT resume_key,complete,seen,error_id FROM index_state WHERE target_id=? AND year=? AND query_signature=?",
                 (target_id, year, signature),
@@ -507,14 +676,126 @@ def index_archive(
                 current = plan.pending[0]
                 _resolve_strategy(current, target_config, target)
                 label = window_label(current.start, current.end)
-                detail = f"page {current.page + 1}/{current.page_count}" if current.strategy == "paged" and current.page_count >= 0 else current.strategy
+                if current.strategy == "paged" and current.page_count >= 0:
+                    detail = f"pages {current.page:,}/{current.page_count:,}; {len(current.retry_pages)} retry"
+                else:
+                    detail = current.strategy
                 emit(callback, ProgressEvent("index", f"Indexing {target} for {label} ({detail})…", completed_windows, total_windows))
                 request_started = time.monotonic()
                 try:
                     if current.strategy == "paged":
-                        rows, finished = _request_paged(client, target_config, target, current)
-                    else:
-                        rows, finished = _request_resume(client, target_config, target, current)
+                        batch = _request_paged_batch(client, target_config, target, current, stop_event)
+                        request_seconds = time.monotonic() - request_started
+                        successes = batch.successful
+                        failures = batch.failed
+                        write_started = time.monotonic()
+                        received = 0
+                        changed = 0
+                        with database:
+                            for result in successes:
+                                received += len(result.rows)
+                                changed += upsert_captures(database, result.rows, target_id, signature)
+                            seen += received
+                            if successes:
+                                current.failures = 0
+                            if batch.finished:
+                                plan.pending.pop(0)
+                                plan.completed += 1
+                                completed_windows += 1
+                            complete = not plan.pending
+                            save_state(database, target_id, year, signature, encode_plan(plan), complete, seen, None if complete else error_id)
+                            if error_id and not failures:
+                                database.execute("UPDATE errors SET resolved=1,last_seen=? WHERE id=?", (utc_now(), error_id))
+                                error_id = None
+                        write_seconds = time.monotonic() - write_started
+                        pages_done = len(successes)
+                        emit(
+                            callback,
+                            ProgressEvent(
+                                "index",
+                                f"{target} {label}: {pages_done}/{len(batch.requested_pages)} pages, received {received:,}, stored {changed:,}, seen {seen:,} — network {request_seconds:.1f}s, database {write_seconds:.2f}s",
+                                completed_windows,
+                                total_windows,
+                            ),
+                        )
+                        if not failures:
+                            continue
+
+                        failure_exc = _paged_failure_error(failures)
+                        if max(current.page_failures.values(), default=0) >= 2:
+                            # One CDX page can be pathologically expensive even
+                            # when its siblings succeed. Do not let that page hold
+                            # the entire year hostage. Preserve successful rows,
+                            # then continue the affected date range using smaller
+                            # resume-key windows and a reduced transport page size.
+                            current.strategy = "resume"
+                            current.pagination_supported = False
+                            current.page = 0
+                            current.page_count = -1
+                            current.resume_key = None
+                            current.retry_pages.clear()
+                            current.page_failures.clear()
+                            current.failures = 0
+                            current.page_size = max(100, target_config.page_size // 2)
+                            parts = split_window(current)
+                            if parts:
+                                for part in parts:
+                                    part.strategy = "resume"
+                                    part.pagination_supported = False
+                                plan.pending[0:1] = parts
+                                added = len(parts) - 1
+                                plan.planned += added
+                                total_windows += added
+                            with database:
+                                error_id = record_error(
+                                    database,
+                                    "index",
+                                    "slow_page_fallback",
+                                    f"{target} {label}: one CDX page failed repeatedly; switching the saved window to smaller resume-key work.",
+                                    retryable=True,
+                                )
+                                save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                            emit(callback, ProgressEvent("index", f"One CDX page remained slow for {target} {label}; successful pages were kept and the remaining range was converted to smaller resumable windows.", completed_windows, total_windows))
+                            continue
+                        if not successes and _is_pagination_unavailable(failure_exc):
+                            current.pagination_supported = False
+                            current.strategy = "resume"
+                            current.page = 0
+                            current.page_count = -1
+                            current.retry_pages.clear()
+                            current.page_failures.clear()
+                            with database:
+                                save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                            emit(callback, ProgressEvent("index", f"Paged CDX is unavailable for {target} {label}; continuing with resume keys.", completed_windows, total_windows))
+                            continue
+                        permanent = next((item.error for item in failures if item.error and _is_permanent_page_error(item.error)), None)
+                        if permanent is not None:
+                            raise permanent
+                        with database:
+                            error_id = record_error(
+                                database,
+                                "index",
+                                "transient_page_retry",
+                                f"{target} {label}: {len(failures)} CDX page(s) requeued: {failure_exc}",
+                                retryable=True,
+                            )
+                            _record_network_event(
+                                database,
+                                "index_page",
+                                str(failure_exc),
+                                {"pages": [item.page for item in failures], "retry_pages": current.retry_pages[:100]},
+                            )
+                            save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                        if successes:
+                            emit(callback, ProgressEvent("index", f"Requeued {len(failures)} slow page(s) while continuing with untouched pages.", completed_windows, total_windows))
+                            continue
+                        error_id = _defer_transient_window(
+                            target_config, database, plan, current, target_id, year, signature, seen, error_id,
+                            failure_exc, callback, completed_windows, total_windows, stop_event,
+                        )
+                        continue
+
+                    rows, finished = _request_resume(client, target_config, target, current)
                     request_seconds = time.monotonic() - request_started
                     write_started = time.monotonic()
                     with database:
@@ -550,9 +831,31 @@ def index_archive(
                         exc, callback, completed_windows, total_windows, stop_event,
                     )
                 except TransientRequestError as exc:
-                    # Pagination avoids scanning the complete URL range for broad queries.
-                    # If resume-key mode has already split to a tiny interval, switch to
-                    # pagination before entering an indefinite retry cycle.
+                    if current.strategy == "paged" and current.page_count < 0:
+                        # A page-count request should be cheap. If it cannot be
+                        # obtained, do not loop on it indefinitely: switch this
+                        # window to resume-key retrieval and let ordinary window
+                        # subdivision take over if the broad request is still too
+                        # expensive for Wayback.
+                        current.strategy = "resume"
+                        current.pagination_supported = False
+                        current.page = 0
+                        current.page_count = -1
+                        current.retry_pages.clear()
+                        current.page_failures.clear()
+                        parts = split_window(current) if exc.splittable else []
+                        if parts:
+                            for part in parts:
+                                part.strategy = "resume"
+                                part.pagination_supported = False
+                            plan.pending[0:1] = parts
+                            added = len(parts) - 1
+                            plan.planned += added
+                            total_windows += added
+                        with database:
+                            save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                        emit(callback, ProgressEvent("index", f"Paged CDX could not count {target} {label}; continuing with resumable smaller windows.", completed_windows, total_windows))
+                        continue
                     if current.strategy == "resume" and current.pagination_supported:
                         parts = split_window(current) if exc.splittable else []
                         if parts:
@@ -569,6 +872,8 @@ def index_archive(
                             current.page = 0
                             current.page_count = -1
                             current.resume_key = None
+                            current.retry_pages.clear()
+                            current.page_failures.clear()
                             with database:
                                 save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
                             emit(callback, ProgressEvent("index", f"Resume-key indexing remained slow for {target} {label}; switching this window to paged CDX indexing.", completed_windows, total_windows))
@@ -578,13 +883,13 @@ def index_archive(
                         exc, callback, completed_windows, total_windows, stop_event,
                     )
                 except RuntimeError as exc:
-                    # Pagination returns HTTP 400 when unavailable on an index. Fall back
-                    # to resume keys instead of treating that as a fatal configuration error.
-                    if current.strategy == "paged" and ("HTTP 400" in str(exc) or "page-count" in str(exc)):
+                    if current.strategy == "paged" and _is_pagination_unavailable(exc):
                         current.pagination_supported = False
                         current.strategy = "resume"
                         current.page = 0
                         current.page_count = -1
+                        current.retry_pages.clear()
+                        current.page_failures.clear()
                         with database:
                             save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
                         emit(callback, ProgressEvent("index", f"Paged CDX is unavailable for {target} {label}; continuing with resume keys.", completed_windows, total_windows))
@@ -596,9 +901,6 @@ def index_archive(
                     emit(callback, ProgressEvent("index", f"Indexing stopped on a permanent configuration or local-data error for {target} {label}. Progress was saved.", completed_windows, total_windows))
                     raise
                 except Exception as exc:
-                    # Unknown network-library exceptions are treated as transient. This is
-                    # intentionally conservative: a project must not be interrupted by a
-                    # transport-specific timeout class that was added in a dependency update.
                     error_id = _defer_transient_window(
                         target_config, database, plan, current, target_id, year, signature, seen, error_id,
                         exc, callback, completed_windows, total_windows, stop_event,

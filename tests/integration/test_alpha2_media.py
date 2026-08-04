@@ -58,7 +58,7 @@ class Alpha2MediaTests(unittest.TestCase):
                 ["timestamp", "original", "mimetype", "statuscode", "digest", "length"],
                 ["20060102030405", "http://example.com/images/photo.jpg", "image/jpeg", "200", "ABC", "4"],
             ]
-            with patch("archive_scout.cdx.client.HttpClient.get_json_any", return_value=cdx_payload):
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", return_value=cdx_payload):
                 database = open_database(root)
                 index_media(config, database, threading.Event())
                 self.assertEqual(database.execute("SELECT COUNT(*) FROM media_captures").fetchone()[0], 1)

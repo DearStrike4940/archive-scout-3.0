@@ -32,7 +32,7 @@ class EndToEndTests(unittest.TestCase):
             ]
             page = b"<html><title>9/11 discussion</title><body>WTC jumpers and canopy footage</body></html>"
 
-            with patch("archive_scout.cdx.client.HttpClient.get_json_any", return_value=cdx_payload), patch(
+            with patch("archive_scout.cdx.client.HttpClient.get_cdx_any", return_value=cdx_payload), patch(
                 "archive_scout.cdx.client.HttpClient.get",
                 return_value={
                     "data": page,
