@@ -13,7 +13,6 @@ python -m PyInstaller \
   --target-arch universal2 \
   --collect-all truststore \
   --collect-all urllib3 --collect-all httpx --collect-all httpcore \
-  --hidden-import archive_scout.network.curl_backend \
   run_app.py
 
 APP="dist/Archive Scout.app"

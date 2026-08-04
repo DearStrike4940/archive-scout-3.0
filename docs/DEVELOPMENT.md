@@ -45,12 +45,7 @@ The test workflow runs on Windows, Linux, and Intel macOS using Python 3.11 and 
 The current source release is:
 
 ```text
-3.0.0-beta.1.3
+3.0.0-beta.1.3.1
 ```
 
-The Python package version uses the PEP 440 form `3.0.0b1.post4` in `pyproject.toml`.
-
-
-## Windows release security
-
-Run `scripts/build_windows.ps1` for an unsigned local test package. The GitHub release workflow stages the application, optionally signs `ArchiveScout.exe`, verifies the Authenticode signature, then runs `scripts/package_windows.ps1`. Tagged builds require the Artifact Signing configuration documented in `docs/WINDOWS_RELEASE_SECURITY.md`.
+The Python package version uses the PEP 440 form `3.0.0b1.post3` in `pyproject.toml`.

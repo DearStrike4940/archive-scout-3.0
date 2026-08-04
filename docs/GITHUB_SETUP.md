@@ -46,24 +46,20 @@ A manual build does not create a GitHub Release because it is not running from a
 Publish the tag:
 
 ```text
-v3.0.0-beta.1.3
+v3.0.0-beta.1.3.1
 ```
-
-Before tagging, configure Windows Artifact Signing as described in `docs/WINDOWS_RELEASE_SECURITY.md`. Tagged builds refuse to publish an unsigned Windows executable.
 
 The tagged build uploads:
 
 ```text
 ArchiveScout-Windows-x64.zip
 ArchiveScout-Windows-x64.zip.sha256
-ArchiveScout-Windows-x64.files.sha256
-ArchiveScout-Windows-x64.spdx.json
 ArchiveScout-Linux-x64.tar.gz
 ArchiveScout-Linux-x64.tar.gz.sha256
 ArchiveScout-macOS-Universal.zip
 ArchiveScout-macOS-Universal.zip.sha256
 ```
 
-The release workflow creates or updates the tagged GitHub Release and attaches all eight files.
+The release workflow creates or updates the tagged GitHub Release and attaches all six files.
 
 Do not use workflow-artifact URLs as public download links. The README points to permanent GitHub Release asset names through `/releases/latest/download/`.
