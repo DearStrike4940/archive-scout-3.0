@@ -45,7 +45,7 @@ The test workflow runs on Windows, Linux, and Intel macOS using Python 3.11 and 
 The current source release is:
 
 ```text
-3.0.0-beta.1.2
+3.0.0-beta.1.2.1
 ```
 
-The Python package version uses the PEP 440 form `3.0.0b1.post2` in `pyproject.toml`.
+The Python package version uses the PEP 440 form `3.0.0b1.post3` in `pyproject.toml`.

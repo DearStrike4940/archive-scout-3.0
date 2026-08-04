@@ -14,6 +14,6 @@ ARCHIVE SCOUT 3.0 BETA 1.2 UPLOAD CHECKLIST
 12. Stop and resume during indexing; confirm completed pages are not repeated.
 13. Run media indexing after a completed normal site index and confirm the Activity page reports local index reuse.
 14. Test at least one Windows machine that previously experienced repeated CDX timeouts.
-15. Publish tag v3.0.0-beta.1.2.
+15. Publish tag v3.0.0-beta.1.2.1.
 16. Confirm all six release assets are public.
 17. Test the README latest-release links while logged out.

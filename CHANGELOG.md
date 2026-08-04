@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.0.0-beta.1.2.1
+
+- Replaced a wall-clock-based CDX concurrency assertion with deterministic active-worker bounds.
+- Fixes a false CI failure on slower macOS Intel runners without changing runtime behavior or reducing concurrency.
+- Keeps the test's actual guarantees: at least two overlapping page requests and no more than the configured worker limit.
+
 ## 3.0.0-beta.1.2
 
 - Rebuilt broad CDX indexing around one resumable yearly page queue instead of twelve serial monthly page-count/index cycles

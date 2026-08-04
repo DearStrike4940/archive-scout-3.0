@@ -1,4 +1,4 @@
-Archive Scout 3.0.0-beta.1.2 source validation
+Archive Scout 3.0.0-beta.1.2.1 source validation
 
 Completed locally before packaging:
 - 85 unit, migration, and integration tests passed

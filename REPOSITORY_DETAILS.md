@@ -2,7 +2,7 @@
 
 Product: `Archive Scout 3.0`
 
-Release: `3.0.0-beta.1.2`
+Release: `3.0.0-beta.1.2.1`
 
 Database schema: `5`
 

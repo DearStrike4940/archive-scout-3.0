@@ -71,7 +71,6 @@ class Beta12FastIndexingTests(unittest.TestCase):
 
     def test_page_fetches_overlap_but_remain_bounded(self):
         client = _ParallelClient()
-        started = time.monotonic()
         results = fetch_cdx_pages(
             client,
             ("https://example.invalid/cdx",),
@@ -80,11 +79,9 @@ class Beta12FastIndexingTests(unittest.TestCase):
             threading.Event(),
             workers=3,
         )
-        elapsed = time.monotonic() - started
         self.assertEqual([item.page for item in results], list(range(6)))
         self.assertGreaterEqual(client.max_active, 2)
         self.assertLessEqual(client.max_active, 3)
-        self.assertLess(elapsed, 0.20)
 
     def test_failed_page_is_requeued_without_repeating_successful_pages(self):
         with tempfile.TemporaryDirectory() as temp:
