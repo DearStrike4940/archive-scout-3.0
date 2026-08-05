@@ -1,18 +1,28 @@
-Archive Scout 3.0 Beta 1.3 — Windows x64
+Archive Scout 3.0 Beta 1.4 for Windows
 
-1. Extract the entire ZIP to a normal folder.
-2. Open the ArchiveScout folder.
-3. Run ArchiveScout.exe.
+VERIFY THE DOWNLOAD
+1. Download ArchiveScout-Windows-x64.zip and its matching .sha256 file from the official GitHub release.
+2. In PowerShell, run:
+   Get-FileHash .\ArchiveScout-Windows-x64.zip -Algorithm SHA256
+3. Confirm that the displayed hash matches the published checksum.
+4. For signed releases, right-click ArchiveScout\ArchiveScout.exe, choose Properties, open Digital Signatures, and confirm that Windows reports a valid signature from the published Archive Scout signer.
 
-Keep every file in the ArchiveScout folder together. Archive Scout is packaged as a normal on-directory application and does not unpack an embedded executable into a temporary folder.
+MARK OF THE WEB / UNBLOCK
+Windows normally marks ZIP files downloaded from the internet. Before extracting, right-click ArchiveScout-Windows-x64.zip, choose Properties, select Unblock when that option is present, click Apply, and then extract the ZIP. Only do this after verifying the source, checksum, and digital signature. Unblocking the ZIP before extraction prevents the internet-zone marker from being copied to every extracted file.
 
-The release folder includes:
-- SHA256SUMS.txt: hashes for the files in this package
-- ArchiveScout-Windows-x64.spdx.json: software bill of materials
+RUN WITHOUT INSTALLING
+Open the extracted ArchiveScout folder and run ArchiveScout.exe.
 
-Official builds may be Authenticode signed. To check a signature:
-1. Right-click ArchiveScout.exe.
-2. Choose Properties.
-3. Open Digital Signatures.
+OPTIONAL INSTALLER
+The included Install Archive Scout.cmd copies the onedir application to your local Programs folder and creates shortcuts. It does not require administrator access.
 
-A missing Digital Signatures tab means the repository owner has not configured release signing yet. It does not by itself indicate malware. Download only from the official GitHub Release and compare the ZIP SHA-256 value with the published .sha256 file.
+DEFENDER FALSE POSITIVES
+If Microsoft Defender identifies the verified, signed ArchiveScout.exe as malware:
+1. Do not disable Defender globally.
+2. Record the exact detection name and Defender security-intelligence version.
+3. Confirm the SHA-256 hash and Authenticode signature.
+4. Submit the exact flagged file to Microsoft as a software developer / clean false positive:
+   https://www.microsoft.com/wdsi/filesubmission
+5. Keep the Microsoft submission ID and wait for the final determination before redistributing that exact binary.
+
+A digital signature and a matching checksum establish publisher and file integrity, but no build setting can force antivirus software to classify a file as safe. Each released Windows executable should be signed consistently and submitted to Microsoft if it is incorrectly detected.

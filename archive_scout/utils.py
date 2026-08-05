@@ -50,26 +50,49 @@ def normalize_target(value: str) -> str:
 
 
 def normalize_cdx_date(value: str, end: bool = False) -> str:
-    digits = re.sub(r"[^0-9]", "", str(value or ""))
-    if len(digits) == 4:
-        return digits + ("1231235959" if end else "0101000000")
-    if len(digits) == 6:
-        year = int(digits[:4])
-        month = int(digits[4:6])
-        if not 1 <= month <= 12:
-            raise ValueError(f"invalid CDX month: {value}")
-        day = calendar.monthrange(year, month)[1] if end else 1
-        return f"{year:04d}{month:02d}{day:02d}" + ("235959" if end else "000000")
-    if len(digits) == 8:
-        year = int(digits[:4])
-        month = int(digits[4:6])
-        day = int(digits[6:8])
-        datetime(year, month, day)
-        return digits + ("235959" if end else "000000")
-    if len(digits) == 14:
-        datetime.strptime(digits, "%Y%m%d%H%M%S")
-        return digits
-    raise ValueError("CDX dates must be YYYY, YYYYMM, YYYYMMDD, or YYYYMMDDhhmmss")
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError(
+            "CDX dates must be YYYY, YYYYMM, YYYYMMDD, YYYYMMDDhhmmss, "
+            "MM/DD/YYYY, or YYYY-MM-DD"
+        )
+
+    # Accept the common human-readable formats users naturally enter while
+    # preserving every compact CDX format supported by earlier releases.
+    for date_format in ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            parsed = datetime.strptime(raw, date_format)
+        except ValueError:
+            continue
+        return parsed.strftime("%Y%m%d") + ("235959" if end else "000000")
+
+    digits = re.sub(r"[^0-9]", "", raw)
+    try:
+        if len(digits) == 4:
+            year = int(digits)
+            datetime(year, 1, 1)
+            return digits + ("1231235959" if end else "0101000000")
+        if len(digits) == 6:
+            year = int(digits[:4])
+            month = int(digits[4:6])
+            day = calendar.monthrange(year, month)[1] if end else 1
+            return f"{year:04d}{month:02d}{day:02d}" + ("235959" if end else "000000")
+        if len(digits) == 8:
+            parsed = datetime.strptime(digits, "%Y%m%d")
+            return parsed.strftime("%Y%m%d") + ("235959" if end else "000000")
+        if len(digits) == 14:
+            datetime.strptime(digits, "%Y%m%d%H%M%S")
+            return digits
+    except (ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"Invalid CDX date {value!r}. Use YYYY, YYYYMM, YYYYMMDD, "
+            "YYYYMMDDhhmmss, MM/DD/YYYY, or YYYY-MM-DD."
+        ) from exc
+
+    raise ValueError(
+        f"Invalid CDX date {value!r}. Use YYYY, YYYYMM, YYYYMMDD, "
+        "YYYYMMDDhhmmss, MM/DD/YYYY, or YYYY-MM-DD."
+    )
 
 
 def parse_cdx_parameter_lines(lines: Iterable[str]) -> list[tuple[str, str]]:

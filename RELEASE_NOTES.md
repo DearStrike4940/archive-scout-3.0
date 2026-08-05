@@ -1,42 +1,48 @@
-# Archive Scout 3.0 Beta 1.2
+# Archive Scout 3.0 Beta 1.4
 
-Beta 1.2 is the indexing-performance patch. It keeps every Alpha 4/Beta 1 feature and the Beta 1.1 malformed-CDX/media fixes, but replaces the slow serial broad-index path.
+Beta 1.4 stays deliberately close to Beta 1.2.1 and Beta 1.3.1. The core CDX indexing, timeout recovery, networking, database, text downloading, scanning, and existing media behavior are unchanged.
 
-## Faster broad indexing
+## Application icon
 
-- Broad wildcard, prefix, host, and domain targets use one yearly CDX page queue instead of twelve separate monthly page queues.
-- Six CDX pages can be in flight at once by default.
-- One shared limiter still spaces request starts by 0.75 seconds, so concurrency hides response latency without producing an uncontrolled burst.
-- Each page requests six CDX blocks by default, reducing round trips.
-- Bulk responses use line-oriented text first, avoiding large JSON-array decoding and retaining malformed-response recovery.
-- Successful pages are written in one SQLite transaction per batch.
-- A failed page is saved and requeued without repeating successful pages.
-- A page that remains slow twice is removed from the paged bottleneck and continued as smaller resume-key windows while successful page data remains stored.
+The supplied Archive Scout icon is bundled as PNG, Windows ICO, and macOS ICNS assets. The GUI loads the PNG at runtime, Windows packages embed the ICO, macOS packages embed the ICNS, and Linux packages use the PNG. The PNG has a transparent background outside the black circular badge.
 
-## Faster media indexing
+## Date input fix
 
-- Media extensions remain combined into one query stream.
-- Media CDX pages use the same bounded parallel engine.
-- When the normal site index is already complete, Archive Scout filters media URLs from SQLite and skips the second network index entirely.
-
-## Timeout behavior
-
-- A read timeout no longer repeats the full wait through every HTTP backend and endpoint.
-- CDX page requests return to the persistent queue after one failed network attempt instead of consuming a second full timeout first.
-- A failed page-count request switches to resume-key indexing with smaller saved windows instead of entering a count-timeout loop.
-- Page position, failed pages, per-page failure counts, and successful captures remain resumable.
-
-## Upgrading
-
-Beta 1 projects using the original 5,000-row, one-block, one-second defaults are moved to 25,000 rows, six blocks, six page workers, and 0.75-second spacing. Compatible completed index state is adopted so a transport-page-size change alone does not force a complete re-index.
-
-## Release assets
+The CDX date parser now accepts the existing compact formats plus common user-entered formats:
 
 ```text
-ArchiveScout-Windows-x64.zip
-ArchiveScout-Windows-x64.zip.sha256
-ArchiveScout-Linux-x64.tar.gz
-ArchiveScout-Linux-x64.tar.gz.sha256
-ArchiveScout-macOS-Universal.zip
-ArchiveScout-macOS-Universal.zip.sha256
+YYYY
+YYYYMM
+YYYYMMDD
+YYYYMMDDhhmmss
+MM/DD/YYYY
+MM-DD-YYYY
+YYYY-MM-DD
+YYYY/MM/DD
 ```
+
+For example, `09/01/2008` becomes `20080901000000`, and an end date of `12/31/2009` becomes `20091231235959`. Invalid dates are rejected with a readable message before the worker starts.
+
+## External embedded media after text scanning
+
+A new operation named **Index, download, scan, then download external embedded media** runs in this order:
+
+1. Index the selected text targets.
+2. Download and scan the selected text captures.
+3. Read the completed documents' extracted URL lists.
+4. Keep only external image/video links matching the Media extension settings.
+5. Look up those exact URLs in Wayback.
+6. Apply the selected earliest/latest/all snapshot strategy.
+7. Download the queued external media only after discovery finishes.
+
+This uses the existing media tables, retries, reports, limits, and download engine. It does not run a broad CDX media crawl of every external host.
+
+## Windows trust and signing
+
+The Windows application remains a PyInstaller onedir package with UPX disabled. Tagged releases require Azure Artifact Signing when configured. The build now separates build and packaging stages: the executable is built, signed, and then packaged only after `Get-AuthenticodeSignature` reports `Valid`.
+
+The Windows package includes `README-WINDOWS.txt` with checksum verification, Digital Signatures verification, Mark-of-the-Web / Unblock instructions, and Microsoft Defender false-positive submission steps. Signing and submission reduce false positives but cannot guarantee a particular antivirus determination.
+
+## Dashboard
+
+The read-only live Dashboard counters remain enabled and continue updating during active and idle use without requiring manual refreshes.

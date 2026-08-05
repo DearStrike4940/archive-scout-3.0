@@ -10,6 +10,8 @@ python -m PyInstaller \
   --clean \
   --windowed \
   --name "Archive Scout" \
+  --icon assets/archivescout.icns \
+  --add-data "assets/archivescout.png:assets" \
   --target-arch universal2 \
   --collect-all truststore \
   --collect-all urllib3 --collect-all httpx --collect-all httpcore \

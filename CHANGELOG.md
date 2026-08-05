@@ -1,12 +1,22 @@
-# Archive Scout 3.0 Beta 1.3.1
+# Archive Scout 3.0 Beta 1.4
+
+- Added the official Archive Scout application icon to the running interface and all three packaged applications.
+- Added support for common human-readable dates such as `09/01/2008`, `12/31/2009`, and `2008-09-01` while preserving all compact CDX date formats.
+- Added a dedicated operation that completes text indexing, downloading, and scanning before indexing and downloading external embedded media found in saved pages.
+- Kept the Beta 1.2.1 indexing, networking, database, and download fundamentals unchanged.
+- Strengthened the Windows signing pipeline so signed packaging fails unless Authenticode verification reports `Valid`.
+- Added Mark-of-the-Web, checksum, signature, and Microsoft Defender false-positive instructions to the Windows package.
+- Retained the live read-only Dashboard counters from Beta 1.3.1.
+
+# Changelog
+
+## 3.0.0-beta.1.3.1
 
 - Restored Beta 1.2.1 application and network behavior.
 - Added live read-only Dashboard counters.
 - Added Windows version metadata and disabled UPX.
 - Added optional Microsoft Artifact Signing for tagged Windows releases.
 - Removed Beta 1.3 SBOM/runtime-security test dependencies from the test suite.
-
-# Changelog
 
 ## 3.0.0-beta.1.2.1
 

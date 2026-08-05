@@ -39,8 +39,9 @@ from ..operations import run_project
 from ..reports.compare import generate_scan_comparison
 from ..reports.export import export_review_package, export_scan
 from ..reports.text import generate_reports
-from ..runtime import FrozenBundleError, ensure_frozen_bundle_available
+from ..runtime import FrozenBundleError, bundled_resource, ensure_frozen_bundle_available
 from ..scanning.full_text import search_documents
+from ..utils import normalize_cdx_date
 from ..projects.backups import list_project_backups, restore_project_backup
 from .dashboard import read_dashboard_counts
 from .theme import REVIEW_COLORS, apply_text_theme, apply_theme
@@ -49,6 +50,7 @@ from .widgets import ToolTip
 MODE_LABELS = OPERATION_MODES
 MODE_HELP = {
     "all": "Queries CDX, downloads pending text captures, scans every selected keyword set, and writes reports.",
+    "external_media_after_scan": "Indexes the site, downloads and scans all selected text pages, then indexes only external media URLs found in those saved pages and downloads them after discovery finishes.",
     "index": "Queries CDX and stores capture metadata without downloading pages.",
     "download": "Downloads pending text captures and scans them with every selected keyword set.",
     "resume": "Continues interrupted pending work without automatically retrying earlier errors.",
@@ -105,6 +107,8 @@ class ArchiveScoutApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"{APP_NAME} {VERSION}")
+        self._app_icon: tk.PhotoImage | None = None
+        self.apply_application_icon()
         self.geometry("1180x820")
         self.minsize(940, 680)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -136,6 +140,20 @@ class ArchiveScoutApp(tk.Tk):
         self.dashboard_refresh_job = self.after(250, self.dashboard_refresh_loop)
         if first_run:
             self.after(450, self.show_welcome)
+
+
+    def apply_application_icon(self) -> None:
+        try:
+            png_path = bundled_resource("assets", "archivescout.png")
+            if png_path.exists():
+                self._app_icon = tk.PhotoImage(file=str(png_path))
+                self.iconphoto(True, self._app_icon)
+            if os.name == "nt":
+                ico_path = bundled_resource("assets", "archivescout.ico")
+                if ico_path.exists():
+                    self.iconbitmap(default=str(ico_path))
+        except (OSError, tk.TclError):
+            self._app_icon = None
 
     def create_variables(self) -> None:
         default_output = Path.home() / "Downloads" / "ArchiveScout"
@@ -554,7 +572,7 @@ class ArchiveScoutApp(tk.Tk):
         ttk.Entry(tab, textvariable=self.from_date_var, width=22).grid(row=0, column=1, sticky="w", padx=(10, 0), pady=4)
         ttk.Label(tab, text="End date:").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Entry(tab, textvariable=self.to_date_var, width=22).grid(row=1, column=1, sticky="w", padx=(10, 0), pady=4)
-        ttk.Label(tab, text="Accepted: YYYY, YYYYMM, YYYYMMDD, or YYYYMMDDhhmmss.").grid(row=2, column=1, sticky="w", padx=(10, 0))
+        ttk.Label(tab, text="Accepted: YYYY, YYYYMM, YYYYMMDD, YYYYMMDDhhmmss, MM/DD/YYYY, or YYYY-MM-DD.").grid(row=2, column=1, sticky="w", padx=(10, 0))
         ttk.Label(tab, text="matchType:").grid(row=3, column=0, sticky="w", pady=(10, 4))
         ttk.Combobox(tab, textvariable=self.cdx_match_type_var, values=("Automatic", "exact", "prefix", "host", "domain"), state="readonly", width=19).grid(row=3, column=1, sticky="w", padx=(10, 0), pady=(10, 4))
         collapse = ttk.Frame(tab)
@@ -580,7 +598,7 @@ class ArchiveScoutApp(tk.Tk):
         tab = ttk.Frame(self.notebook, padding=10)
         tab.columnconfigure(0, weight=1)
         tab.columnconfigure(1, weight=1)
-        tab.rowconfigure(2, weight=1)
+        tab.rowconfigure(3, weight=1)
         self.notebook.add(tab, text="Media")
         options = ttk.Frame(tab)
         options.grid(row=0, column=0, columnspan=2, sticky="ew")
@@ -589,14 +607,20 @@ class ArchiveScoutApp(tk.Tk):
         ttk.Checkbutton(options, text="Videos", variable=self.media_videos_var).grid(row=0, column=2, padx=(8, 0))
         ttk.Checkbutton(options, text="Discover media linked inside saved pages", variable=self.media_embedded_var).grid(row=0, column=3, padx=(16, 0))
         ttk.Checkbutton(options, text="Allow external hosts", variable=self.media_external_var).grid(row=0, column=4, padx=(8, 0))
+        ttk.Label(
+            tab,
+            text="The ‘Index, download, scan, then download external embedded media’ operation waits until every saved text page has been scanned before it looks up and downloads external image/video links found in those pages.",
+            wraplength=1080,
+            style="Muted.TLabel",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         labels = ttk.Frame(tab)
-        labels.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 4))
+        labels.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 4))
         labels.columnconfigure(0, weight=1)
         labels.columnconfigure(1, weight=1)
         ttk.Label(labels, text="Media sites/paths (blank uses Sites and paths)").grid(row=0, column=0, sticky="w")
         ttk.Label(labels, text="Include extensions, one per line").grid(row=0, column=1, sticky="w", padx=(12, 0))
         editors = ttk.Frame(tab)
-        editors.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        editors.grid(row=3, column=0, columnspan=2, sticky="nsew")
         editors.columnconfigure(0, weight=1)
         editors.columnconfigure(1, weight=1)
         editors.columnconfigure(2, weight=1)
@@ -613,7 +637,7 @@ class ArchiveScoutApp(tk.Tk):
         self.media_exclude_text = tk.Text(right, wrap="none", font="TkFixedFont")
         self.media_exclude_text.grid(row=1, column=0, sticky="nsew")
         settings = ttk.Frame(tab)
-        settings.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        settings.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Label(settings, text="Snapshot:").grid(row=0, column=0)
         ttk.Combobox(settings, textvariable=self.media_strategy_var, values=("earliest", "latest", "all"), state="readonly", width=10).grid(row=0, column=1, padx=(5, 15))
         ttk.Label(settings, text="Maximum media size (MB):").grid(row=0, column=2)
@@ -991,16 +1015,18 @@ class ArchiveScoutApp(tk.Tk):
 
     def build_config(self, require_keywords: bool = True) -> ProjectConfig:
         self.save_current_keyword_set()
+        selected_mode = MODE_LABELS[self.mode_var.get()]
+        external_after_scan = selected_mode == "external_media_after_scan"
         try:
             media = MediaConfig(
-                enabled=self.media_enabled_var.get(),
+                enabled=self.media_enabled_var.get() or external_after_scan,
                 targets=self.lines_from(self.media_targets_text),
                 include_images=self.media_images_var.get(),
                 include_videos=self.media_videos_var.get(),
                 include_extensions=self.lines_from(self.media_include_text),
                 exclude_extensions=self.lines_from(self.media_exclude_text),
-                discover_embedded=self.media_embedded_var.get(),
-                allow_external_embeds=self.media_external_var.get(),
+                discover_embedded=self.media_embedded_var.get() or external_after_scan,
+                allow_external_embeds=self.media_external_var.get() or external_after_scan,
                 snapshot_strategy=self.media_strategy_var.get(),
                 max_file_mb=float(self.media_max_var.get()),
                 preserve_paths=self.media_preserve_var.get(),
@@ -1030,16 +1056,18 @@ class ArchiveScoutApp(tk.Tk):
                 retry_max_seconds=float(self.network_retry_max_var.get()),
                 failure_pause_threshold=int(self.network_failure_limit_var.get()),
             )
+            from_date = normalize_cdx_date(self.from_date_var.get(), end=False)
+            to_date = normalize_cdx_date(self.to_date_var.get(), end=True)
             config = ProjectConfig(
                 output_dir=Path(self.output_var.get()),
                 targets=self.lines_from(self.targets_text),
                 keywords=list(self.keyword_sets[0]["rules"]) if self.keyword_sets else [],
                 keyword_set_name=self.keyword_sets[0]["name"] if self.keyword_sets else "Current keywords",
                 keyword_sets=[KeywordSetConfig(item["name"], list(item["rules"]), bool(item.get("selected", True))) for item in self.keyword_sets],
-                from_year=int(str(self.from_date_var.get()).strip()[:4]),
-                to_year=int(str(self.to_date_var.get()).strip()[:4]),
-                from_date=self.from_date_var.get(),
-                to_date=self.to_date_var.get(),
+                from_year=int(from_date[:4]),
+                to_year=int(to_date[:4]),
+                from_date=from_date,
+                to_date=to_date,
                 cdx_filters=self.lines_from(self.cdx_filters_text),
                 cdx_collapses=[value for value, enabled in (("urlkey", self.collapse_urlkey_var.get()), ("digest", self.collapse_digest_var.get())) if enabled],
                 cdx_match_type="" if self.cdx_match_type_var.get() == "Automatic" else self.cdx_match_type_var.get(),
@@ -1064,10 +1092,10 @@ class ArchiveScoutApp(tk.Tk):
             ).normalized()
         except (ValueError, KeyError) as exc:
             raise ValueError(f"Check the numeric settings, keyword rules, and target lines: {exc}") from exc
-        mode = MODE_LABELS[self.mode_var.get()]
-        if mode in {"all", "index"} and not config.targets:
+        mode = selected_mode
+        if mode in {"all", "external_media_after_scan", "index"} and not config.targets:
             raise ValueError("Add at least one site or path.")
-        if require_keywords and mode in {"all", "download", "resume", "rescan", "retry_errors"} and not config.selected_keyword_sets():
+        if require_keywords and mode in {"all", "external_media_after_scan", "download", "resume", "rescan", "retry_errors"} and not config.selected_keyword_sets():
             raise ValueError("Select at least one non-empty keyword set.")
         if mode == "merge_project" and not config.analysis.merge_source:
             raise ValueError("Choose a source project folder in Archive analysis.")

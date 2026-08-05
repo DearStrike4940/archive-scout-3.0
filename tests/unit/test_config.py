@@ -17,6 +17,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(normalize_cdx_date("2006", False), "20060101000000")
         self.assertEqual(normalize_cdx_date("200602", True), "20060228235959")
         self.assertEqual(normalize_cdx_date("20060911", True), "20060911235959")
+        self.assertEqual(normalize_cdx_date("09/01/2008", False), "20080901000000")
+        self.assertEqual(normalize_cdx_date("12/31/2009", True), "20091231235959")
+        self.assertEqual(normalize_cdx_date("2008-09-01", False), "20080901000000")
 
     def test_reserved_cdx_parameter_rejected(self):
         with self.assertRaises(ValueError):

@@ -18,7 +18,7 @@ $StartShortcut.WorkingDirectory = $Destination
 $StartShortcut.Save()
 $UninstallShortcut = $Shell.CreateShortcut((Join-Path $StartDirectory "Uninstall Archive Scout.lnk"))
 $UninstallShortcut.TargetPath = "powershell.exe"
-$UninstallShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $Destination 'uninstall.ps1')`""
+$UninstallShortcut.Arguments = "-NoProfile -File `"$(Join-Path $Destination 'uninstall.ps1')`""
 $UninstallShortcut.WorkingDirectory = $Destination
 $UninstallShortcut.Save()
 Copy-Item (Join-Path $PSScriptRoot "uninstall.ps1") $Destination -Force

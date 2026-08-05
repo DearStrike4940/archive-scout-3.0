@@ -1,19 +1,22 @@
-ARCHIVE SCOUT 3.0 BETA 1.2 UPLOAD CHECKLIST
+ARCHIVE SCOUT 3.0 BETA 1.4 UPLOAD CHECKLIST
 
-1. Back up the current Archive Scout 3.0 repository and one important project.
-2. Extract archive-scout-3.0-beta1.2-repository.zip.
-3. Open the archive-scout-3.0-beta1.2 folder.
+1. Back up the current repository and one important Archive Scout project.
+2. Extract archive-scout-3.0-beta1.4-repository.zip.
+3. Open the archive-scout-3.0-beta1.4 folder.
 4. Reveal hidden files with Command + Shift + . on macOS.
 5. Upload the CONTENTS of that folder to the repository root.
-6. Confirm .github/workflows is present.
-7. Run the Tests workflow.
-8. Run Build All Platforms from the newest main commit.
-9. Smoke-test the generated Windows, Linux, and macOS packages.
-10. Open a copy of a large Beta 1 project and confirm project.json adopts the new defaults when the old defaults were unchanged.
-11. Resume a broad wildcard index and confirm the Activity page reports yearly page progress and parallel page batches.
-12. Stop and resume during indexing; confirm completed pages are not repeated.
-13. Run media indexing after a completed normal site index and confirm the Activity page reports local index reuse.
-14. Test at least one Windows machine that previously experienced repeated CDX timeouts.
-15. Publish tag v3.0.0-beta.1.3.1.
-16. Confirm all six release assets are public.
-17. Test the README latest-release links while logged out.
+6. Confirm .github/workflows/build-and-release.yml and .github/workflows/tests.yml are present.
+7. Run the Tests workflow from the new main commit.
+8. Confirm all six OS/Python jobs pass.
+9. Configure Azure Artifact Signing before creating a public Windows tag.
+10. Run Build All Platforms from the newest main commit.
+11. Confirm the Windows signing step runs and build_windows.ps1 -SkipBuild -RequireSigned succeeds.
+12. Confirm ArchiveScout.exe Properties > Digital Signatures reports a valid signature.
+13. Smoke-test Windows, Linux, Intel macOS, and Apple Silicon macOS packages when available.
+14. Confirm the application icon appears in the window, taskbar/dock, and packaged application.
+15. Test Start date 09/01/2008 and End date 12/31/2009.
+16. Test the external embedded-media operation on saved pages containing at least one external image or video URL.
+17. Test the exact signed Windows ZIP with current Microsoft Defender definitions.
+18. Submit the signed executable to Microsoft if it is still incorrectly detected.
+19. Publish tag v3.0.0-beta.1.4.
+20. Confirm all six release assets are public and their checksums match.

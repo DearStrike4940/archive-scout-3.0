@@ -1,3 +1,3 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1"
+powershell.exe -NoProfile -File "%~dp0uninstall.ps1"
 pause

@@ -44,6 +44,14 @@ def frozen_bundle_runtime_path() -> Path | None:
     return Path(value)
 
 
+
+
+def bundled_resource(*parts: str) -> Path:
+    """Return a bundled asset path in source and PyInstaller builds."""
+    runtime_path = frozen_bundle_runtime_path()
+    root = runtime_path if runtime_path is not None else Path(__file__).resolve().parent.parent
+    return root.joinpath(*parts)
+
 def macos_app_bundle_path() -> Path | None:
     if sys.platform != "darwin":
         return None

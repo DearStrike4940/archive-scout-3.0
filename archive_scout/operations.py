@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -15,7 +16,7 @@ from .downloads.downloader import download_archive
 from .downloads.retry import retry_error_urls
 from .events import ConnectivityPaused, ProgressEvent, Stopped
 from .media.downloader import download_media, retry_media_errors
-from .media.indexer import index_media
+from .media.indexer import index_external_embedded_media, index_media
 from .media.reports import generate_media_reports
 from .projects.integrity import check_project_integrity
 from .projects.backups import create_project_backup
@@ -29,7 +30,7 @@ from .scanning.jobs import ScanJob
 from .scanning.rescanner import rescan_keyword_sets
 
 SUPPORTED_MODES = {
-    "all", "index", "download", "resume", "rescan", "retry_errors", "report", "integrity",
+    "all", "external_media_after_scan", "index", "download", "resume", "rescan", "retry_errors", "report", "integrity",
     "repair", "backup", "diagnostics", "import_folder",
     "media_all", "media_index", "media_download", "media_retry",
     "analysis", "forum_rebuild", "merge_project",
@@ -91,15 +92,22 @@ def run_project(
     callback: Callable[[ProgressEvent], None] | None = None,
 ) -> dict[str, Path]:
     config = config.normalized()
+    if mode == "external_media_after_scan":
+        config.media = replace(
+            config.media.normalized(),
+            enabled=True,
+            discover_embedded=True,
+            allow_external_embeds=True,
+        )
     if mode not in SUPPORTED_MODES:
         raise ValueError(f"unsupported mode: {mode}")
     if config.from_date > config.to_date:
         raise ValueError("start date must not be later than end date")
-    if mode in {"all", "index"} and not config.targets:
+    if mode in {"all", "external_media_after_scan", "index"} and not config.targets:
         raise ValueError("at least one target is required")
     if mode.startswith("media_") and not (config.media.targets or config.targets):
         raise ValueError("at least one media target or site target is required")
-    if mode in {"all", "download", "resume", "rescan", "retry_errors"} and not config.selected_keyword_sets():
+    if mode in {"all", "external_media_after_scan", "download", "resume", "rescan", "retry_errors"} and not config.selected_keyword_sets():
         raise ValueError("select at least one keyword set")
     stop_event = stop_event or threading.Event()
     config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -208,12 +216,12 @@ def run_project(
             database.commit()
             return paths
 
-        if mode == "all":
+        if mode in {"all", "external_media_after_scan"}:
             index_archive(config, database, stop_event, callback)
 
         jobs = prepare_scan_jobs(database, config, mode)
         primary_run_id = jobs[0].scan_run_id
-        if mode == "all":
+        if mode in {"all", "external_media_after_scan"}:
             download_archive(config, database, primary_run_id, stop_event, callback, states=("pending",), scan_jobs=jobs)
         elif mode in {"download", "resume"}:
             download_archive(config, database, primary_run_id, stop_event, callback, states=("pending",), scan_jobs=jobs)
@@ -237,7 +245,12 @@ def run_project(
         paths = generate_job_reports(config, database, jobs)
         if mode == "retry_errors" and database.execute("SELECT COUNT(*) FROM media_captures").fetchone()[0]:
             paths.update(generate_media_reports(config, database))
-        if mode == "all" and config.media.enabled:
+        if mode == "external_media_after_scan":
+            emit(callback, ProgressEvent("media_embed", "Text scanning is complete. Indexing external embedded media URLs now…"))
+            index_external_embedded_media(config, database, stop_event, callback)
+            download_media(config, database, stop_event, callback)
+            paths.update(generate_media_reports(config, database))
+        elif mode == "all" and config.media.enabled:
             index_media(config, database, stop_event, callback)
             download_media(config, database, stop_event, callback)
             paths.update(generate_media_reports(config, database))

@@ -2,7 +2,7 @@
 
 Product: `Archive Scout 3.0`
 
-Release: `3.0.0-beta.1.3.1`
+Release: `3.0.0-beta.1.4`
 
 Database schema: `5`
 
@@ -22,42 +22,24 @@ ArchiveScout-macOS-Universal.zip
 
 Each package has a corresponding `.sha256` file.
 
-## Beta 1.2 focus
+## Beta 1.4 scope
 
-Beta 1.2 is a performance patch over the Alpha 4/Beta 1 integration release and the Beta 1.1 CDX/media hotfix.
+Beta 1.4 deliberately preserves the Beta 1.2.1 indexing, networking, database, timeout-recovery, downloading, scanning, and existing media fundamentals.
 
-Indexing systems:
+Focused changes:
 
-- one yearly page queue for broad CDX targets
-- six bounded parallel page requests by default
-- six CDX blocks per page by default
-- 80 request starts per minute through one shared fixed limiter
-- text-first bulk CDX parsing with JSON fallback
-- per-page retry queues and exact resume state
-- page-count timeout fallback to smaller resume-key windows
-- completed-state adoption across compatible Beta 1 page-size defaults
-- media reuse from the normal site index
-- one combined media extension query
+- live read-only Dashboard totals retained from Beta 1.3.1
+- official PNG, ICO, and ICNS application icons
+- MM/DD/YYYY and ISO-style date input support
+- friendly date validation before worker startup
+- one dedicated text-first external embedded-media workflow
+- signed Windows packaging that fails unless Authenticode verification is valid
+- Windows Mark-of-the-Web, checksum, signature, and Defender false-positive documentation
+- PyInstaller onedir packaging and UPX-disabled Windows builds retained
 
-Reliability systems:
+## External embedded-media workflow
 
-- multi-backend HTTP transport: httpx, urllib3, and curl
-- system proxy and certificate-environment support
-- CDX endpoint rotation and last-success preference
-- no backend/endpoint cascade after a read timeout
-- coordinated HTTP 429 recovery
-- persisted CDX queues and graceful connectivity pauses
-- schema version 5 operation, network-event, backup, and repair records
-- crash recovery, project backup, restore, repair, and diagnostics
-
-Interface systems:
-
-- dashboard and left navigation
-- Simple and Advanced modes
-- System, Light, and Dark themes
-- font scaling and persistent interface state
-- paginated results and visual review states
-- CDX page-block and parallel-page controls
+The dedicated operation completes the normal text index, downloads and scans the selected pages, then reads the saved documents' extracted link lists. It looks up only matching external media URLs and downloads them after discovery is complete. It uses the existing media extension filters, size limit, snapshot strategy, retries, database tables, and reports.
 
 ## macOS bundle integrity
 
@@ -65,4 +47,4 @@ The macOS build verifies `Contents/Resources/base_library.zip`, the executable, 
 
 ## Repository upload
 
-Upload the contents of the extracted `archive-scout-3.0-beta1.2` folder to the repository root. The hidden `.github` folder must be included.
+Upload the contents of the extracted `archive-scout-3.0-beta1.4` folder to the repository root. The hidden `.github` folder must be included.

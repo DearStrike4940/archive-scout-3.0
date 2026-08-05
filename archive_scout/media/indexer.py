@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 from collections import defaultdict
+from dataclasses import replace
 from typing import Callable
 from urllib.parse import urlsplit
 
@@ -825,6 +826,8 @@ def index_embedded_media(
     stop_event: threading.Event,
     callback: Callable[[ProgressEvent], None] | None,
     signature: str,
+    *,
+    external_only: bool = False,
 ) -> None:
     media = config.media.normalized()
     if not media.discover_embedded:
@@ -840,7 +843,10 @@ def index_embedded_media(
             if not allowed:
                 continue
             host = (urlsplit(link).hostname or "").casefold()
-            if not media.allow_external_embeds and host not in target_hosts:
+            is_external = bool(host and host not in target_hosts)
+            if external_only and not is_external:
+                continue
+            if not media.allow_external_embeds and is_external:
                 continue
             candidates.setdefault(link, int(row["id"]))
     total = len(candidates)
@@ -875,7 +881,64 @@ def index_embedded_media(
             allowed, kind, extension = allowed_media_url(row["original"], media, row.get("mimetype", ""))
             if allowed and kind:
                 with database:
-                    upsert_media_capture(database, row, None, signature, kind, extension, document_id, "embedded")
+                    source_type = "external_embedded" if (urlsplit(link).hostname or "").casefold() not in target_hosts else "embedded"
+                    upsert_media_capture(database, row, None, signature, kind, extension, document_id, source_type)
+
+
+def index_external_embedded_media(
+    config: ProjectConfig,
+    database: sqlite3.Connection,
+    stop_event: threading.Event,
+    callback: Callable[[ProgressEvent], None] | None = None,
+) -> str:
+    """Index only external media URLs found after saved text pages have been scanned."""
+    config = config.normalized()
+    config.media = replace(
+        config.media.normalized(),
+        enabled=True,
+        discover_embedded=True,
+        allow_external_embeds=True,
+    )
+    if not selected_extensions(config.media):
+        raise ValueError("no image or video extensions remain after include/exclude filtering")
+    signature = media_query_signature(config)
+    limiter = FixedRateLimiter(config.cdx_delay)
+    host_gate = SharedHostGate(config.rate_limit_base_pause, config.rate_limit_max_pause)
+
+    def on_retry(attempt: int, total: int, reason: str, wait_seconds: float) -> None:
+        if callback:
+            stage = "rate_limit" if "all Wayback requests paused" in reason else "media_embed"
+            if wait_seconds > 0:
+                message = f"{reason}. Retry {attempt}/{total} in {wait_seconds:.1f}s…"
+            else:
+                message = reason
+            callback(ProgressEvent(stage, message))
+
+    client = HttpClient(
+        limiter,
+        1,
+        min(max(config.read_timeout, 30.0), 120.0),
+        config.user_agent,
+        stop_event,
+        retry_callback=on_retry,
+        connect_timeout=min(max(config.connect_timeout, 5.0), 45.0),
+        read_timeout=min(max(config.read_timeout, 30.0), 120.0),
+        pool_size=config.network.normalized().cdx_workers,
+        host_gate=host_gate,
+        rate_limit_attempts=0,
+        rate_limit_max_wait=0,
+        network_backend=config.network.normalized().backend,
+        trust_environment=config.network.normalized().trust_environment,
+        network_callback=(lambda message: callback(ProgressEvent("network", message)) if callback else None),
+    )
+    try:
+        index_embedded_media(
+            config, database, client, stop_event, callback, signature, external_only=True
+        )
+        _apply_snapshot_strategy(database, signature, config.media.snapshot_strategy)
+        return signature
+    finally:
+        client.close()
 
 
 def index_media(

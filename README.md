@@ -8,9 +8,9 @@ One repository produces builds for Windows x64, Linux x64, and universal macOS f
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.4.1/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.4.1/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.4.1/ArchiveScout-macOS-Universal.zip)
+- [Download for Windows x64](../../releases/latest/download/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](../../releases/latest/download/ArchiveScout-Linux-x64.tar.gz)
+- [Download for macOS Intel and Apple Silicon](../../releases/latest/download/ArchiveScout-macOS-Universal.zip)
 
 ### macOS installation
 
@@ -107,6 +107,10 @@ Schema version 5 adds:
 
 Indexes public Wayback captures, downloads pending text pages, evaluates every selected keyword set, and writes separate reports for each set. Media can optionally run afterward.
 
+### Index, download, scan, then download external embedded media
+
+Completes the normal text index, download, and keyword scan first. It then reads the extracted links from every saved text page, indexes matching media hosted on external domains, and downloads that media only after the external-link discovery pass finishes. This does not run a broad crawl against each external host.
+
 ### Index URLs only
 
 Stores capture metadata without downloading the pages.
@@ -153,6 +157,10 @@ The Dashboard provides:
 - Repair project and rebuild indexes
 - Export diagnostic package
 - Import an existing archive folder
+
+## Date formats
+
+Start and end dates accept `YYYY`, `YYYYMM`, `YYYYMMDD`, `YYYYMMDDhhmmss`, `MM/DD/YYYY`, `MM-DD-YYYY`, `YYYY-MM-DD`, and `YYYY/MM/DD`. Human-readable dates are normalized before an operation starts, so invalid calendar dates produce a readable validation message instead of a worker traceback.
 
 ## Network settings
 
@@ -385,6 +393,6 @@ Each package has a corresponding `.sha256` file.
 
 ## Release status
 
-`3.0.0-beta.1.3.1` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
+`3.0.0-beta.1.4` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
 
 See [CHANGELOG.md](CHANGELOG.md), [ROADMAP.md](ROADMAP.md), and [SOURCE_VALIDATION.txt](SOURCE_VALIDATION.txt).
