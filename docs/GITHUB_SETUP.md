@@ -46,7 +46,7 @@ A manual build does not create a GitHub Release because it is not running from a
 Publish the tag:
 
 ```text
-v3.0.0-beta.1.4
+v3.0.0-beta.1.5
 ```
 
 The tagged build uploads:

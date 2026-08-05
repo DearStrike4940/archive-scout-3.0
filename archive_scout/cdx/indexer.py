@@ -594,6 +594,7 @@ def _request_resume(
     payload = client.get_cdx_any(
         cdx_endpoints(config),
         build_cdx_params(config, target, current.start, current.end, current.resume_key, page_size=page_size),
+        max_bytes=max(64 * 1024 * 1024, page_size * 2048),
         prefer_text=True,
     )
     rows, next_resume = parse_cdx(payload)

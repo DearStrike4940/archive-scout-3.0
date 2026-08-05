@@ -1,30 +1,25 @@
-Archive Scout 3.0.0-beta.1.4 source validation
+Archive Scout 3.0.0-beta.1.5 source validation
 
 Completed locally before packaging:
-- 92 unit, migration, integration, packaging, interface, and workflow regression tests passed under Xvfb
+- 97 unit, migration, integration, packaging, interface, and workflow regression tests passed under Xvfb
 - python -m compileall completed for archive_scout and tests
 - both GitHub workflow files parsed as YAML
 - Linux and macOS build scripts passed bash syntax validation
-- the GUI loaded all 11 pages and displayed the bundled PNG icon
-- MM/DD/YYYY and YYYY-MM-DD dates normalized before worker startup
-- the dedicated external-media operation was verified to run text indexing, text downloading/scanning, external-media indexing, and external-media downloading in that order
-- external links from completed document link lists were indexed without running a broad external-host CDX crawl
-- the Windows build retained PyInstaller onedir and --noupx
-- the Windows build embedded the ICO and stable version metadata
-- the signing workflow used azure/login@v3 and azure/artifact-signing-action@v2
-- signed packaging invoked build_windows.ps1 with -SkipBuild -RequireSigned
-- the Windows packaging script rejected any requested signed package whose Authenticode status was not Valid
-- Windows installer launchers no longer request ExecutionPolicy Bypass
-- the Windows package documentation covered checksum verification, signature verification, Mark-of-the-Web Unblock steps, and Microsoft Defender false-positive submission
-- PNG, ICO, and ICNS icon headers and contents were validated
-- existing malformed-CDX, timeout, 429, migration, media, analysis, merge, backup, repair, and macOS packaging tests remained passing
+- Beta 1.4 application behavior and database schema were retained
+- the shared CDX request-start interval remained fixed at 0.75 seconds (80 starts per minute)
+- the default CDX page-worker count increased from 6 to 10
+- the default numbered-page block size increased from 6 to 9
+- the default resume-key request size increased from 25,000 to 50,000 rows
+- HTTPX pooled keep-alive retention increased from 45 to 90 seconds
+- the resume-response byte budget now scales with the 50,000-row request size
+- untouched Beta 1.4 defaults migrate to the new values while custom network settings remain unchanged
+- paged and resume-key parameter tests confirmed pageSize=9 and limit=50000
+- existing timeout, 429, malformed-CDX, media, analysis, merge, backup, repair, icon, date, signing, external-media, and macOS packaging tests remained passing
 
 Still required or not available locally:
 - no live Internet Archive stress test was performed
-- no real Azure Artifact Signing transaction was performed
+- no real Windows, Linux, or universal macOS package was built in this container
 - no native Windows Defender or SmartScreen scan was possible
 - PowerShell was unavailable, so the Windows build script was not executed locally
-- native Windows, Linux, and universal macOS packages were not built in this container
 - GitHub Actions must run the six-job test matrix and all three native package jobs
 - each generated package should be smoke-tested on real hardware
-- a valid Authenticode signature reduces trust and reputation problems but cannot guarantee any antivirus classification

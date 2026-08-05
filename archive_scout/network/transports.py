@@ -121,7 +121,7 @@ class HttpxBackend:
             limits=httpx.Limits(
                 max_connections=max(2, int(pool_size)),
                 max_keepalive_connections=max(1, int(pool_size)),
-                keepalive_expiry=45.0,
+                keepalive_expiry=90.0,
             ),
             timeout=httpx.Timeout(
                 connect=self.connect_timeout,

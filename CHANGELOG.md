@@ -1,3 +1,16 @@
+# Changelog
+
+## 3.0.0-beta.1.5
+
+- Increased default CDX page workers from 6 to 10.
+- Increased numbered-page block size from 6 to 9.
+- Increased resume-key page size from 25,000 to 50,000 rows.
+- Kept the fixed 0.75-second shared request-start interval (80 starts/minute).
+- Extended HTTPX keep-alive retention from 45 to 90 seconds.
+- Scaled the resume-response byte budget with the 50,000-row request size.
+- Migrates only untouched older defaults; custom speed and network settings are preserved.
+- No indexing semantics, media behavior, scanning behavior, database schema, UI workflow, packaging, or download behavior changed.
+
 # Archive Scout 3.0 Beta 1.4
 
 - Added the official Archive Scout application icon to the running interface and all three packaged applications.
@@ -7,8 +20,6 @@
 - Strengthened the Windows signing pipeline so signed packaging fails unless Authenticode verification reports `Valid`.
 - Added Mark-of-the-Web, checksum, signature, and Microsoft Defender false-positive instructions to the Windows package.
 - Retained the live read-only Dashboard counters from Beta 1.3.1.
-
-# Changelog
 
 ## 3.0.0-beta.1.3.1
 

@@ -131,8 +131,8 @@ class NetworkConfig:
     trust_environment: bool = True
     endpoint_mode: str = "auto"
     index_strategy: str = "auto"
-    page_blocks: int = 6
-    cdx_workers: int = 6
+    page_blocks: int = 9
+    cdx_workers: int = 10
     persistent_retries: bool = True
     retry_base_seconds: float = 5.0
     retry_max_seconds: float = 300.0
@@ -186,7 +186,7 @@ class ProjectConfig:
     download_scope: str = "all_text"
     minimum_score: int = 1
     max_file_mb: float = 25.0
-    page_size: int = 25000
+    page_size: int = 50000
     cdx_delay: float = 0.75
     download_delay: float = 0.5
     retries: int = 4
@@ -356,9 +356,19 @@ def load_project_config(path: Path) -> ProjectConfig:
     network_payload = payload.get("network") or {}
     source_version = str(payload.get("version") or "")
     legacy_beta1 = source_version.startswith("3.0.0-beta.1") and not source_version.startswith("3.0.0-beta.1.2")
-    loaded_page_size = int(payload.get("page_size", 25000))
+    loaded_page_size = int(payload.get("page_size", 50000))
     loaded_cdx_delay = float(payload.get("cdx_delay", 0.75))
-    loaded_page_blocks = int(network_payload.get("page_blocks", 6))
+    loaded_page_blocks = int(network_payload.get("page_blocks", 9))
+    pre_beta15_versions = {
+        "3.0.0-beta.1",
+        "3.0.0-beta.1.1",
+        "3.0.0-beta.1.2",
+        "3.0.0-beta.1.2.1",
+        "3.0.0-beta.1.3",
+        "3.0.0-beta.1.3.1",
+        "3.0.0-beta.1.4",
+    }
+    loaded_cdx_workers = int(network_payload.get("cdx_workers", 6 if source_version in pre_beta15_versions else 10))
     if legacy_beta1:
         if loaded_page_size == 5000:
             loaded_page_size = 25000
@@ -366,6 +376,22 @@ def load_project_config(path: Path) -> ProjectConfig:
             loaded_cdx_delay = 0.75
         if loaded_page_blocks == 1:
             loaded_page_blocks = 6
+
+    # Beta 1.5 raises only the transport batching/concurrency defaults while
+    # preserving the same 0.75-second shared request-start spacing (80/minute).
+    # Upgrade only untouched pre-1.5 defaults; custom network settings remain
+    # exactly as the user saved them.
+    pre_beta15 = source_version in pre_beta15_versions
+    untouched_pre_beta15_defaults = (
+        loaded_page_size == 25000
+        and loaded_cdx_delay == 0.75
+        and loaded_page_blocks == 6
+        and loaded_cdx_workers == 6
+    )
+    if pre_beta15 and untouched_pre_beta15_defaults:
+        loaded_page_size = 50000
+        loaded_page_blocks = 9
+        loaded_cdx_workers = 10
     return ProjectConfig(
         output_dir=Path(payload.get("output_dir") or path.parent),
         targets=list(payload.get("targets") or []),
@@ -431,7 +457,7 @@ def load_project_config(path: Path) -> ProjectConfig:
             endpoint_mode=str(network_payload.get("endpoint_mode", "auto")),
             index_strategy=str(network_payload.get("index_strategy", "auto")),
             page_blocks=loaded_page_blocks,
-            cdx_workers=int(network_payload.get("cdx_workers", 6)),
+            cdx_workers=loaded_cdx_workers,
             persistent_retries=bool(network_payload.get("persistent_retries", True)),
             retry_base_seconds=float(network_payload.get("retry_base_seconds", 5.0)),
             retry_max_seconds=float(network_payload.get("retry_max_seconds", 300.0)),

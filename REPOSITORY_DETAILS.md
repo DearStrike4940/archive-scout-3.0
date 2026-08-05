@@ -2,7 +2,7 @@
 
 Product: `Archive Scout 3.0`
 
-Release: `3.0.0-beta.1.4`
+Release: `3.0.0-beta.1.5`
 
 Database schema: `5`
 
@@ -22,20 +22,18 @@ ArchiveScout-macOS-Universal.zip
 
 Each package has a corresponding `.sha256` file.
 
-## Beta 1.4 scope
+## Beta 1.5 scope
 
-Beta 1.4 deliberately preserves the Beta 1.2.1 indexing, networking, database, timeout-recovery, downloading, scanning, and existing media fundamentals.
+Beta 1.5 changes only Wayback connection utilization and CDX transport batching. All Beta 1.4 features and workflows remain in place.
 
 Focused changes:
 
-- live read-only Dashboard totals retained from Beta 1.3.1
-- official PNG, ICO, and ICNS application icons
-- MM/DD/YYYY and ISO-style date input support
-- friendly date validation before worker startup
-- one dedicated text-first external embedded-media workflow
-- signed Windows packaging that fails unless Authenticode verification is valid
-- Windows Mark-of-the-Web, checksum, signature, and Defender false-positive documentation
-- PyInstaller onedir packaging and UPX-disabled Windows builds retained
+- 10 bounded CDX page workers instead of 6
+- 9 CDX blocks per numbered page instead of 6
+- 50,000 rows per resume-key request instead of 25,000
+- the same fixed 0.75-second global request-start spacing (80 starts per minute)
+- 90-second HTTPX keep-alive retention instead of 45 seconds
+- automatic migration only for untouched old defaults; custom values are preserved
 
 ## External embedded-media workflow
 
@@ -47,4 +45,4 @@ The macOS build verifies `Contents/Resources/base_library.zip`, the executable, 
 
 ## Repository upload
 
-Upload the contents of the extracted `archive-scout-3.0-beta1.4` folder to the repository root. The hidden `.github` folder must be included.
+Upload the contents of the extracted `archive-scout-3.0-beta1.5` folder to the repository root. The hidden `.github` folder must be included.

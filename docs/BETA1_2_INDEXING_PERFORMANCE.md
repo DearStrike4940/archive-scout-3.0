@@ -59,3 +59,8 @@ These defaults are intended to balance speed and public-service load. Increasing
 The automated suite verifies concurrency, bounded workers, failed-page requeueing, page-count fallback, text-first requests, endpoint timeout behavior, state migration, and local media reuse. It does not reproduce Internet Archive production load or guarantee a particular wall-clock speed on every site.
 
 CDX indexing uses one immediate network attempt per page. Retry ownership lives in the persistent page/window queue, so one expensive timeout is not repeated in place before Archive Scout can requeue, split, or change strategy.
+
+
+## Beta 1.5 safe-edge tuning
+
+Beta 1.5 keeps the same shared 0.75-second request-start interval (80 starts per minute) while adopting the strongest conservative values demonstrated by the comparison downloader: 10 in-flight CDX page workers, 9 CDX blocks per numbered page, and 50,000 rows per resume-key request. This increases overlap and reduces round trips without raising the request-start rate. HTTP keep-alive retention was extended from 45 to 90 seconds so pooled connections survive longer server pauses and database commits.

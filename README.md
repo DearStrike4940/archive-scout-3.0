@@ -8,9 +8,9 @@ One repository produces builds for Windows x64, Linux x64, and universal macOS f
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.5/ArchiveScout-Windows-x64.1.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.5/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.5/ArchiveScout-macOS-Universal.zip)
+- [Download for Windows x64](../../releases/latest/download/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](../../releases/latest/download/ArchiveScout-Linux-x64.tar.gz)
+- [Download for macOS Intel and Apple Silicon](../../releases/latest/download/ArchiveScout-macOS-Universal.zip)
 
 ### macOS installation
 
@@ -32,7 +32,7 @@ Beta 1.2 was rebuilt after reviewing the supplied Wayback Machine Downloader arc
 - If a page-count request itself cannot complete, Archive Scout switches that window to resume-key retrieval and smaller saved intervals instead of looping forever.
 - Media indexing uses the same parallel page engine. When the normal site index is already complete, media rows are filtered from SQLite locally and no second CDX traversal is made.
 
-New projects use 25,000-row resume pages, six CDX page blocks, six page workers, and 0.75-second request spacing. Existing Beta 1 projects using the original defaults are migrated automatically, and compatible completed index states are adopted rather than discarded solely because the transport page size changed.
+New projects use 50,000-row resume pages, nine CDX page blocks, ten page workers, and 0.75-second request spacing. The request-start ceiling remains 80 per minute; the added workers overlap slow Wayback responses rather than increasing request frequency. Existing Beta 1 projects using the original defaults are migrated automatically, and compatible completed index states are adopted rather than discarded solely because the transport page size changed.
 
 ## What changed in Archive Scout 3.0 Beta 1
 
@@ -186,7 +186,7 @@ Network backend: Automatic
 CDX endpoint: Automatic
 Index strategy: Automatic
 Workers: 4
-CDX request delay: 0.75 second
+CDX request delay: 0.75 second (fixed 80 request starts/minute)
 Download request delay: 0.5 seconds
 Persistent recovery: Enabled
 Failures before graceful pause: 8
@@ -393,6 +393,6 @@ Each package has a corresponding `.sha256` file.
 
 ## Release status
 
-`3.0.0-beta.1.4` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
+`3.0.0-beta.1.5` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
 
 See [CHANGELOG.md](CHANGELOG.md), [ROADMAP.md](ROADMAP.md), and [SOURCE_VALIDATION.txt](SOURCE_VALIDATION.txt).

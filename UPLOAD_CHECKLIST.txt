@@ -1,8 +1,8 @@
-ARCHIVE SCOUT 3.0 BETA 1.4 UPLOAD CHECKLIST
+ARCHIVE SCOUT 3.0 BETA 1.5 UPLOAD CHECKLIST
 
 1. Back up the current repository and one important Archive Scout project.
-2. Extract archive-scout-3.0-beta1.4-repository.zip.
-3. Open the archive-scout-3.0-beta1.4 folder.
+2. Extract archive-scout-3.0-beta1.5-repository.zip.
+3. Open the archive-scout-3.0-beta1.5 folder.
 4. Reveal hidden files with Command + Shift + . on macOS.
 5. Upload the CONTENTS of that folder to the repository root.
 6. Confirm .github/workflows/build-and-release.yml and .github/workflows/tests.yml are present.
@@ -18,5 +18,5 @@ ARCHIVE SCOUT 3.0 BETA 1.4 UPLOAD CHECKLIST
 16. Test the external embedded-media operation on saved pages containing at least one external image or video URL.
 17. Test the exact signed Windows ZIP with current Microsoft Defender definitions.
 18. Submit the signed executable to Microsoft if it is still incorrectly detected.
-19. Publish tag v3.0.0-beta.1.4.
+19. Publish tag v3.0.0-beta.1.5.
 20. Confirm all six release assets are public and their checksums match.

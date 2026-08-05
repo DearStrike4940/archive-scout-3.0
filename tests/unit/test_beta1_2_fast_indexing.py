@@ -281,10 +281,10 @@ class Beta12FastIndexingTests(unittest.TestCase):
                 encoding="utf-8",
             )
             config = load_project_config(path)
-            self.assertEqual(config.page_size, 25000)
+            self.assertEqual(config.page_size, 50000)
             self.assertEqual(config.cdx_delay, 0.75)
-            self.assertEqual(config.network.page_blocks, 6)
-            self.assertEqual(config.network.cdx_workers, 6)
+            self.assertEqual(config.network.page_blocks, 9)
+            self.assertEqual(config.network.cdx_workers, 10)
 
 
 if __name__ == "__main__":
