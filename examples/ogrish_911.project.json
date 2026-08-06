@@ -1,5 +1,5 @@
 {
-  "version": "3.0.0-beta.1.5",
+  "version": "3.0.0-beta.1.6",
   "output_dir": "ArchiveScout-Ogrish-911",
   "targets": [
     "ogrishforum.com/*",
