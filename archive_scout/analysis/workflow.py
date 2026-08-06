@@ -21,10 +21,9 @@ from ..extraction.regex import parse_extractor_rules, run_extractors
 from ..media.extensions import extension_from_url, media_kind
 from ..parsing.embeds import extract_embed_candidates
 from ..parsing.forums import parse_forum_posts
-from ..utils import atomic_write_text, hash_text, json_value, utc_now
+from ..utils import atomic_write_lines, atomic_write_text, hash_text, json_value, utc_now
 from .diffs import build_first_appearances, compare_snapshots
 from .duplicates import cluster_duplicates
-from .timelines import build_timeline
 
 
 def _emit(callback: Callable[[ProgressEvent], None] | None, stage: str, message: str, completed: int = 0, total: int = 0) -> None:
@@ -83,6 +82,15 @@ def _lookup_external_assets(
     analysis = config.analysis.normalized()
     if not analysis.search_external_assets or not analysis.external_domains:
         return 0
+    total = min(
+        int(analysis.external_asset_limit),
+        int(database.execute(
+            """
+            SELECT COUNT(*) FROM legacy_assets
+            WHERE external=1 AND archive_status IN ('discovered','retry')
+            """
+        ).fetchone()[0]),
+    )
     rows = database.execute(
         """
         SELECT la.id,la.document_id,la.original_url
@@ -90,8 +98,8 @@ def _lookup_external_assets(
         WHERE la.external=1 AND la.archive_status IN ('discovered','retry')
         ORDER BY la.id LIMIT ?
         """,
-        (analysis.external_asset_limit,),
-    ).fetchall()
+        (total,),
+    )
     limiter = FixedRateLimiter(config.cdx_delay)
     host_gate = SharedHostGate(config.rate_limit_base_pause, config.rate_limit_max_pause)
 
@@ -126,7 +134,7 @@ def _lookup_external_assets(
                 with database:
                     database.execute("UPDATE legacy_assets SET archive_status='blocked_domain',updated_at=? WHERE id=?", (utc_now(), row["id"]))
                 continue
-            _emit(callback, "asset_search", f"Searching external asset {index:,}/{len(rows):,}: {url}", index, len(rows))
+            _emit(callback, "asset_search", f"Searching external asset {index:,}/{total:,}: {url}", index, total)
             while not stop_event.is_set():
                 try:
                     payload = client.get_json_any(cdx_endpoints(config), _exact_asset_params(config, url))
@@ -218,12 +226,20 @@ def _write_reports(config: ProjectConfig, database: sqlite3.Connection, summary:
         ),
     }
     for filename, (header, query) in specs.items():
-        lines = [header.rstrip("\n")]
-        for row in database.execute(query):
-            values = [str(value if value is not None else "").replace("\t", " ").replace("\r", " ").replace("\n", " ") for value in row]
-            lines.append("\t".join(values))
+        def report_lines(header=header, query=query):
+            yield header.rstrip("\n")
+            for row in database.execute(query):
+                values = [
+                    str(value if value is not None else "")
+                    .replace("\t", " ")
+                    .replace("\r", " ")
+                    .replace("\n", " ")
+                    for value in row
+                ]
+                yield "\t".join(values)
+
         path = folder / filename
-        atomic_write_text(path, "\n".join(lines) + "\n")
+        atomic_write_lines(path, report_lines())
         paths[filename.rsplit(".", 1)[0]] = path
     return paths
 
@@ -260,14 +276,7 @@ def run_analysis(
     }
     custom_rules = parse_extractor_rules(analysis.extractor_rules)
     hosts = _target_hosts(config)
-    rows = database.execute(
-        """
-        SELECT d.id AS document_id,d.path,d.title,d.body_text,d.links_json,
-               c.id AS capture_id,c.original_url,c.timestamp
-        FROM documents d JOIN captures c ON c.id=d.capture_id
-        ORDER BY d.id
-        """
-    ).fetchall()
+    document_count = int(database.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
     try:
         with database:
             database.execute("DELETE FROM forum_posts")
@@ -275,12 +284,20 @@ def run_analysis(
             if not forum_only:
                 database.execute("DELETE FROM extractions")
                 database.execute("DELETE FROM legacy_assets")
+        rows = database.execute(
+            """
+            SELECT d.id AS document_id,d.path,d.title,d.body_text,d.links_json,
+                   c.id AS capture_id,c.original_url,c.timestamp
+            FROM documents d JOIN captures c ON c.id=d.capture_id
+            ORDER BY d.id
+            """
+        )
         for index, row in enumerate(rows, 1):
             if stop_event.is_set():
                 raise Stopped
             raw = _read_source(str(row["path"]))
             original_url = str(row["original_url"])
-            _emit(callback, "analysis", f"Analyzing document {index:,}/{len(rows):,}", index, len(rows))
+            _emit(callback, "analysis", f"Analyzing document {index:,}/{document_count:,}", index, document_count)
             if analysis.reconstruct_threads:
                 thread = parse_forum_posts(raw, original_url, analysis.forum_profile)
                 if thread.posts:
@@ -380,7 +397,6 @@ def run_analysis(
                 summary["first_appearances"] = build_first_appearances(database, extracted_values)
             if analysis.build_provenance:
                 summary["provenance_edges"] = trace_provenance(database)
-                build_timeline(database)
         paths = _write_reports(config, database, summary)
         with database:
             database.execute(

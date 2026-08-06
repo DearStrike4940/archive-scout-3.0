@@ -7,12 +7,11 @@ import re
 import sqlite3
 import threading
 import time
-from collections import defaultdict
 from dataclasses import replace
 from typing import Callable
 from urllib.parse import urlsplit
 
-from ..cdx.client import HttpClient, RateLimitDeferred, TransientRequestError
+from ..cdx.client import CDXRow, HttpClient, RateLimitDeferred, TransientRequestError, request_cdx_rows
 from ..cdx.indexer import (
     PendingWindow,
     PagedBatch,
@@ -23,19 +22,24 @@ from ..cdx.indexer import (
     split_window,
     window_label,
 )
-from ..cdx.parallel import PageFetchResult, fetch_cdx_pages
+from ..cdx.parallel import PageFetchResult, effective_page_workers, iter_cdx_pages
 from ..cdx.parameters import (
     cdx_endpoints,
     cdx_query_signature,
     cdx_query_signatures,
     cdx_target_value,
     cdx_year_window,
-    parse_cdx,
     parse_num_pages,
     preferred_index_strategy,
 )
 from ..config import ProjectConfig
-from ..database.repositories import get_or_create_media_target, record_error, upsert_media_capture, upsert_media_captures
+from ..database.repositories import (
+    cdx_row_to_dict,
+    get_or_create_media_target,
+    record_error,
+    upsert_media_capture,
+    upsert_media_captures,
+)
 from ..downloads.rate_limit import FixedRateLimiter, SharedHostGate
 from ..events import ConnectivityPaused, ProgressEvent, Stopped
 from ..utils import json_value, parse_cdx_parameter_lines, utc_now
@@ -168,22 +172,42 @@ def build_media_paged_params(
 def _apply_snapshot_strategy(database: sqlite3.Connection, signature: str, strategy: str) -> None:
     if strategy == "all":
         return
-    rows = database.execute(
-        "SELECT id,original_url,timestamp,state FROM media_captures WHERE query_signature=? ORDER BY original_url,timestamp",
-        (signature,),
-    ).fetchall()
-    grouped: dict[str, list[sqlite3.Row]] = defaultdict(list)
-    for row in rows:
-        grouped[row["original_url"]].append(row)
+    direction = "ASC" if strategy == "earliest" else "DESC"
+    now = utc_now()
     with database:
-        for items in grouped.values():
-            keep = items[0] if strategy == "earliest" else items[-1]
-            for item in items:
-                if item["id"] == keep["id"]:
-                    if item["state"] == "skipped_strategy":
-                        database.execute("UPDATE media_captures SET state='pending',updated_at=? WHERE id=?", (utc_now(), item["id"]))
-                elif item["state"] != "downloaded":
-                    database.execute("UPDATE media_captures SET state='skipped_strategy',updated_at=? WHERE id=?", (utc_now(), item["id"]))
+        database.execute("DROP TABLE IF EXISTS temp.archive_scout_media_keep")
+        database.execute(
+            "CREATE TEMP TABLE archive_scout_media_keep(id INTEGER PRIMARY KEY) WITHOUT ROWID"
+        )
+        database.execute(
+            f"""
+            INSERT INTO archive_scout_media_keep(id)
+            SELECT id FROM (
+                SELECT id,ROW_NUMBER() OVER(
+                    PARTITION BY original_url ORDER BY timestamp {direction},id {direction}
+                ) AS position
+                FROM media_captures WHERE query_signature=?
+            ) WHERE position=1
+            """,
+            (signature,),
+        )
+        database.execute(
+            """
+            UPDATE media_captures SET state='pending',updated_at=?
+            WHERE query_signature=? AND state='skipped_strategy'
+              AND id IN (SELECT id FROM archive_scout_media_keep)
+            """,
+            (now, signature),
+        )
+        database.execute(
+            """
+            UPDATE media_captures SET state='skipped_strategy',updated_at=?
+            WHERE query_signature=? AND state!='downloaded'
+              AND id NOT IN (SELECT id FROM archive_scout_media_keep)
+            """,
+            (now, signature),
+        )
+        database.execute("DROP TABLE archive_scout_media_keep")
 
 
 def _save_media_state(
@@ -298,18 +322,18 @@ def _reuse_completed_main_index(
         batch = cursor.fetchmany(10000)
         if not batch:
             break
-        accepted: list[tuple[dict[str, str], str, str]] = []
+        accepted: list[tuple[CDXRow, str, str]] = []
         seen += len(batch)
         for item in batch:
-            row = {
-                "original": str(item["original_url"]),
-                "timestamp": str(item["timestamp"]),
-                "mimetype": str(item["mimetype"] or ""),
-                "statuscode": str(item["statuscode"] or ""),
-                "digest": str(item["digest"] or ""),
-                "length": str(item["length"] or 0),
-            }
-            allowed, kind, extension = allowed_media_url(row["original"], media, row["mimetype"])
+            row: CDXRow = (
+                str(item["timestamp"]),
+                str(item["original_url"]),
+                str(item["mimetype"] or ""),
+                str(item["statuscode"] or ""),
+                str(item["digest"] or ""),
+                str(item["length"] or 0),
+            )
+            allowed, kind, extension = allowed_media_url(row[1], media, row[2])
             if allowed and kind:
                 accepted.append((row, kind, extension))
         changed += upsert_media_captures(
@@ -400,6 +424,7 @@ def _request_media_paged_batch(
     current: PendingWindow,
     extensions: list[str],
     stop_event: threading.Event,
+    consume_success: Callable[[PageFetchResult], None] | None = None,
 ) -> PagedBatch:
     endpoints = cdx_endpoints(config)
     network = config.network.normalized()
@@ -416,10 +441,12 @@ def _request_media_paged_batch(
     if current.page >= current.page_count and not current.retry_pages:
         return PagedBatch([], [], True)
 
-    pages, next_page = _select_page_batch(current, network.cdx_workers)
+    page_workers = effective_page_workers(network.cdx_workers, current.page_blocks)
+    pages, next_page = _select_page_batch(current, page_workers)
     if not pages:
         return PagedBatch([], [], True)
-    results = fetch_cdx_pages(
+    results: list[PageFetchResult] = []
+    for result in iter_cdx_pages(
         client,
         endpoints,
         pages,
@@ -427,9 +454,12 @@ def _request_media_paged_batch(
             config, target, current.start, current.end, extensions, page, current.page_blocks
         ),
         stop_event,
-        workers=network.cdx_workers,
+        workers=page_workers,
         max_bytes=max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024),
-    )
+    ):
+        if result.succeeded and consume_success is not None:
+            consume_success(result)
+        results.append(result)
     current.page = next_page
     retry_set = set(current.retry_pages)
     for result in results:
@@ -451,7 +481,8 @@ def _request_media_resume(
     extensions: list[str],
 ) -> tuple[list[dict[str, str]], bool]:
     page_size = current.page_size or config.page_size
-    payload = client.get_cdx_any(
+    result = request_cdx_rows(
+        client,
         cdx_endpoints(config),
         build_media_params(
             config,
@@ -464,7 +495,7 @@ def _request_media_resume(
         ),
         prefer_text=True,
     )
-    rows, next_resume = parse_cdx(payload)
+    rows, next_resume = result.rows, result.resume_key
     if next_resume:
         if next_resume == current.resume_key:
             raise TransientRequestError("CDX returned the same media resume key twice", splittable=True)
@@ -493,12 +524,19 @@ def _permanent_media_page_error(exc: BaseException) -> bool:
 
 
 def _accept_media_rows(
-    rows: list[dict[str, str]],
+    rows: list[CDXRow] | list[dict[str, str]],
     media,
-) -> list[tuple[dict[str, str], str, str]]:
-    accepted: list[tuple[dict[str, str], str, str]] = []
+) -> list[tuple[CDXRow | dict[str, str], str, str]]:
+    """Filter media rows without expanding every compact CDX tuple to a dict."""
+    accepted: list[tuple[CDXRow | dict[str, str], str, str]] = []
     for row in rows:
-        allowed, kind, actual_extension = allowed_media_url(row["original"], media, row.get("mimetype", ""))
+        if isinstance(row, dict):
+            original = str(row.get("original") or "")
+            mimetype = str(row.get("mimetype") or "")
+        else:
+            original = str(row[1] if len(row) > 1 else "")
+            mimetype = str(row[2] if len(row) > 2 else "")
+        allowed, kind, actual_extension = allowed_media_url(original, media, mimetype)
         if allowed and kind:
             accepted.append((row, kind, actual_extension))
     return accepted
@@ -525,6 +563,7 @@ def index_direct_media(
                 tasks.append((target, target_config, year, windows))
     total = sum(len(windows) for _, _, _, windows in tasks)
     completed = 0
+    connection_failure_streak = 0
 
     for target, target_config, year, default_windows in tasks:
         if stop_event.is_set():
@@ -597,25 +636,37 @@ def index_direct_media(
             request_started = time.monotonic()
             try:
                 if current.strategy == "paged":
-                    batch = _request_media_paged_batch(
-                        target_config, client, target, current, extensions, stop_event
-                    )
-                    request_seconds = time.monotonic() - request_started
-                    successes = batch.successful
-                    failures = batch.failed
                     received = 0
                     accepted_count = 0
                     changed = 0
-                    write_started = time.monotonic()
-                    with database:
-                        for result in successes:
-                            received += len(result.rows)
-                            accepted = _accept_media_rows(result.rows, media)
-                            accepted_count += len(accepted)
+                    write_seconds = 0.0
+
+                    def store_completed_media_page(result: PageFetchResult) -> None:
+                        nonlocal received, accepted_count, changed, write_seconds
+                        page_received = len(result.rows)
+                        accepted = _accept_media_rows(result.rows, media)
+                        write_started = time.monotonic()
+                        with database:
                             changed += upsert_media_captures(database, accepted, target_id, signature)
+                        write_seconds += time.monotonic() - write_started
+                        received += page_received
+                        accepted_count += len(accepted)
+                        result.rows.clear()
+                        accepted.clear()
+
+                    batch = _request_media_paged_batch(
+                        target_config, client, target, current, extensions, stop_event,
+                        store_completed_media_page,
+                    )
+                    request_seconds = max(0.0, time.monotonic() - request_started - write_seconds)
+                    successes = batch.successful
+                    failures = batch.failed
+                    with database:
                         seen += received
                         if successes:
                             current.failures = 0
+                            connection_failure_streak = 0
+                            transient_failure_streak = 0
                         if batch.finished:
                             plan.pending.pop(0)
                             plan.completed += 1
@@ -634,7 +685,6 @@ def index_direct_media(
                         if error_id and not failures:
                             database.execute("UPDATE errors SET resolved=1,last_seen=? WHERE id=?", (utc_now(), error_id))
                             error_id = None
-                    write_seconds = time.monotonic() - write_started
                     if callback:
                         callback(
                             ProgressEvent(
@@ -648,6 +698,11 @@ def index_direct_media(
                         continue
 
                     failure_exc = _media_failure_error(failures)
+                    if not successes and all(
+                        isinstance(item.error, TransientRequestError) and item.error.connection_failed
+                        for item in failures
+                    ):
+                        raise failure_exc
                     if max(current.page_failures.values(), default=0) >= 2:
                         current.strategy = "resume"
                         current.pagination_supported = False
@@ -718,12 +773,16 @@ def index_direct_media(
                 rows, finished = _request_media_resume(
                     target_config, client, target, current, extensions
                 )
+                connection_failure_streak = 0
+                transient_failure_streak = 0
                 request_seconds = time.monotonic() - request_started
+                received = len(rows)
                 accepted = _accept_media_rows(rows, media)
+                accepted_count = len(accepted)
                 write_started = time.monotonic()
                 with database:
                     changed = upsert_media_captures(database, accepted, target_id, signature)
-                    seen += len(rows)
+                    seen += received
                     current.failures = 0
                     if finished:
                         plan.pending.pop(0)
@@ -739,16 +798,73 @@ def index_direct_media(
                     callback(
                         ProgressEvent(
                             "media_index",
-                            f"{target} {label}: received {len(rows):,}, accepted {len(accepted):,}, stored {changed:,} — network {request_seconds:.1f}s, database {write_seconds:.2f}s",
+                            f"{target} {label}: received {received:,}, accepted {accepted_count:,}, stored {changed:,} — network {request_seconds:.1f}s, database {write_seconds:.2f}s",
                             completed,
                             total,
                         )
                     )
+                accepted.clear()
+                rows.clear()
             except Stopped:
                 with database:
                     _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                 raise
             except (RateLimitDeferred, TransientRequestError) as exc:
+                if isinstance(exc, TransientRequestError) and exc.connection_failed:
+                    connection_failure_streak += 1
+                    current.failures += 1
+                    network = target_config.network.normalized()
+                    with database:
+                        error_id = record_error(
+                            database,
+                            "media_index",
+                            "wayback_connection_unavailable",
+                            f"{target} {label}: {exc}",
+                            retryable=True,
+                        )
+                        _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
+                    if connection_failure_streak >= network.connection_failure_pause_threshold:
+                        raise ConnectivityPaused(
+                            f"Archive Scout could not establish a Wayback connection for media indexing after "
+                            f"{connection_failure_streak} complete multi-backend attempts. The exact queue was saved."
+                        ) from exc
+                    wait = min(15.0, network.connection_retry_seconds * 2 ** max(0, connection_failure_streak - 1))
+                    if callback:
+                        callback(
+                            ProgressEvent(
+                                "network",
+                                f"Wayback connection setup failed. Retrying the same saved media request in {wait:.1f}s "
+                                f"({connection_failure_streak}/{network.connection_failure_pause_threshold})…",
+                                completed,
+                                total,
+                            )
+                        )
+                    stop_event.wait(wait)
+                    if stop_event.is_set():
+                        raise Stopped
+                    continue
+                if isinstance(exc, TransientRequestError):
+                    transient_failure_streak += 1
+                    network = target_config.network.normalized()
+                    no_progress_limit = min(
+                        network.failure_pause_threshold,
+                        4 if exc.timed_out else 6,
+                    )
+                    if transient_failure_streak >= no_progress_limit:
+                        current.failures += 1
+                        with database:
+                            error_id = record_error(
+                                database,
+                                "media_index",
+                                "transient_media_index_delay",
+                                f"{target} {label}: {transient_failure_streak} consecutive transient CDX failures without a successful response: {exc}",
+                                retryable=True,
+                            )
+                            _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
+                        raise ConnectivityPaused(
+                            f"Wayback returned no usable media CDX response after {transient_failure_streak} consecutive recovery attempts. "
+                            "The exact media queue was saved instead of looping indefinitely."
+                        ) from exc
                 if current.strategy == "paged" and current.page_count < 0:
                     current.strategy = "resume"
                     current.pagination_supported = False
@@ -813,10 +929,16 @@ def index_direct_media(
                     _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
                 raise
             except Exception as exc:
-                error_id = _defer_media_window(
-                    target_config, database, plan, current, target_id, year, state_signature,
-                    seen, error_id, target, label, exc, completed, total, stop_event, callback,
-                )
+                with database:
+                    error_id = record_error(
+                        database,
+                        "media_index",
+                        "unexpected_media_index_error",
+                        f"{target} {label}: {type(exc).__name__}: {exc}",
+                        retryable=False,
+                    )
+                    _save_media_state(database, target_id, year, state_signature, encode_plan(plan), False, seen, error_id)
+                raise
 
 
 def index_embedded_media(
@@ -859,7 +981,8 @@ def index_embedded_media(
         if callback:
             callback(ProgressEvent("media_embed", f"Looking up embedded media {index:,}/{total:,}", index, total))
         try:
-            payload = client.get_cdx_any(
+            result = request_cdx_rows(
+                client,
                 cdx_endpoints(config),
                 build_media_params(config, link, config.from_date, config.to_date, exact=True),
                 prefer_text=True,
@@ -868,16 +991,17 @@ def index_embedded_media(
             with database:
                 record_error(database, "media_embed", "transient_embed_lookup", f"{link}: {exc}", document_id=document_id, retryable=True)
             continue
-        rows, _ = parse_cdx(payload)
+        rows = result.rows
         if not rows:
             continue
         if media.snapshot_strategy == "earliest":
-            chosen = [min(rows, key=lambda row: row["timestamp"])]
+            chosen = [min(rows, key=lambda row: row[0])]
         elif media.snapshot_strategy == "latest":
-            chosen = [max(rows, key=lambda row: row["timestamp"])]
+            chosen = [max(rows, key=lambda row: row[0])]
         else:
             chosen = rows
-        for row in chosen:
+        for compact in chosen:
+            row = cdx_row_to_dict(compact)
             allowed, kind, extension = allowed_media_url(row["original"], media, row.get("mimetype", ""))
             if allowed and kind:
                 with database:
@@ -921,7 +1045,7 @@ def index_external_embedded_media(
         config.user_agent,
         stop_event,
         retry_callback=on_retry,
-        connect_timeout=min(max(config.connect_timeout, 5.0), 45.0),
+        connect_timeout=min(max(config.connect_timeout, 5.0), 15.0),
         read_timeout=min(max(config.read_timeout, 30.0), 120.0),
         pool_size=config.network.normalized().cdx_workers,
         host_gate=host_gate,
@@ -979,7 +1103,7 @@ def index_media(
         config.user_agent,
         stop_event,
         retry_callback=on_retry,
-        connect_timeout=min(max(config.connect_timeout, 5.0), 45.0),
+        connect_timeout=min(max(config.connect_timeout, 5.0), 15.0),
         read_timeout=min(max(config.read_timeout, 30.0), 120.0),
         pool_size=config.network.normalized().cdx_workers,
         host_gate=host_gate,

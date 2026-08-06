@@ -43,23 +43,28 @@ def open_database(root: Path, migrate: bool = True) -> sqlite3.Connection:
         except Exception:
             pass
     database = sqlite3.connect(path, timeout=60)
-    database.row_factory = sqlite3.Row
-    database.execute("PRAGMA journal_mode=WAL")
-    database.execute("PRAGMA synchronous=NORMAL")
-    database.execute("PRAGMA foreign_keys=ON")
-    database.execute("PRAGMA temp_store=MEMORY")
-    database.execute("PRAGMA cache_size=-65536")
-    database.execute("PRAGMA mmap_size=268435456")
-    database.execute("PRAGMA wal_autocheckpoint=10000")
-    database.execute("PRAGMA busy_timeout=60000")
-    initialize_schema(database)
-    # Recover states left behind by a terminated process. Downloads are safe to
-    # retry because files are written through temporary paths and replaced atomically.
-    database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
-    database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
-    database.execute("UPDATE scan_runs SET status='interrupted' WHERE status='running'")
-    database.execute(
-        "UPDATE operation_runs SET status='interrupted',completed_at=datetime('now'),updated_at=datetime('now'),message=COALESCE(message,'Recovered after an unclean shutdown') WHERE status='running'"
-    )
-    database.commit()
-    return database
+    try:
+        database.row_factory = sqlite3.Row
+        database.execute("PRAGMA journal_mode=WAL")
+        database.execute("PRAGMA synchronous=NORMAL")
+        database.execute("PRAGMA foreign_keys=ON")
+        database.execute("PRAGMA temp_store=MEMORY")
+        database.execute("PRAGMA cache_size=-65536")
+        database.execute("PRAGMA mmap_size=268435456")
+        database.execute("PRAGMA wal_autocheckpoint=10000")
+        database.execute("PRAGMA busy_timeout=60000")
+        initialize_schema(database)
+        # Recover states left behind by a terminated process. Downloads are safe
+        # to retry because files are written through temporary paths and replaced
+        # atomically.
+        database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+        database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
+        database.execute("UPDATE scan_runs SET status='interrupted' WHERE status='running'")
+        database.execute(
+            "UPDATE operation_runs SET status='interrupted',completed_at=datetime('now'),updated_at=datetime('now'),message=COALESCE(message,'Recovered after an unclean shutdown') WHERE status='running'"
+        )
+        database.commit()
+        return database
+    except Exception:
+        database.close()
+        raise

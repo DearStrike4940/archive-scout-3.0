@@ -15,8 +15,8 @@ from ..database.repositories import get_or_create_target, record_error, upsert_c
 from ..downloads.rate_limit import FixedRateLimiter, SharedHostGate
 from ..events import ConnectivityPaused, ProgressEvent, Stopped
 from ..utils import utc_now
-from .client import HttpClient, RateLimitDeferred, TransientRequestError, is_timeout_error
-from .parallel import PageFetchResult, fetch_cdx_pages
+from .client import HttpClient, RateLimitDeferred, TransientRequestError, is_timeout_error, request_cdx_rows
+from .parallel import PageFetchResult, effective_page_workers, iter_cdx_pages
 from .parameters import (
     build_cdx_params,
     build_num_pages_params,
@@ -25,7 +25,6 @@ from .parameters import (
     cdx_query_signature,
     cdx_query_signatures,
     cdx_year_window,
-    parse_cdx,
     parse_num_pages,
     preferred_index_strategy,
 )
@@ -494,7 +493,7 @@ def _client_for_config(
         config.user_agent,
         stop_event,
         retry_callback=on_retry,
-        connect_timeout=min(max(config.connect_timeout, 5.0), 45.0),
+        connect_timeout=min(max(config.connect_timeout, 5.0), 15.0),
         read_timeout=min(max(config.read_timeout, 30.0), 120.0),
         pool_size=network.cdx_workers,
         host_gate=host_gate,
@@ -542,6 +541,7 @@ def _request_paged_batch(
     target: str,
     current: PendingWindow,
     stop_event: threading.Event,
+    consume_success: Callable[[PageFetchResult], None] | None = None,
 ) -> PagedBatch:
     endpoints = cdx_endpoints(config)
     network = config.network.normalized()
@@ -558,18 +558,23 @@ def _request_paged_batch(
     if current.page >= current.page_count and not current.retry_pages:
         return PagedBatch([], [], True)
 
-    pages, next_page = _select_page_batch(current, network.cdx_workers)
+    page_workers = effective_page_workers(network.cdx_workers, current.page_blocks)
+    pages, next_page = _select_page_batch(current, page_workers)
     if not pages:
         return PagedBatch([], [], True)
-    results = fetch_cdx_pages(
+    results: list[PageFetchResult] = []
+    for result in iter_cdx_pages(
         client,
         endpoints,
         pages,
         lambda page: build_paged_cdx_params(config, target, current.start, current.end, page, current.page_blocks),
         stop_event,
-        workers=network.cdx_workers,
+        workers=page_workers,
         max_bytes=max(64 * 1024 * 1024, current.page_blocks * 12 * 1024 * 1024),
-    )
+    ):
+        if result.succeeded and consume_success is not None:
+            consume_success(result)
+        results.append(result)
     current.page = next_page
     retry_set = set(current.retry_pages)
     for result in results:
@@ -589,15 +594,16 @@ def _request_resume(
     config: ProjectConfig,
     target: str,
     current: PendingWindow,
-) -> tuple[list[dict[str, str]], bool]:
+) -> tuple[list[tuple[str, str, str, str, str, str]], bool]:
     page_size = current.page_size or config.page_size
-    payload = client.get_cdx_any(
+    result = request_cdx_rows(
+        client,
         cdx_endpoints(config),
         build_cdx_params(config, target, current.start, current.end, current.resume_key, page_size=page_size),
         max_bytes=max(64 * 1024 * 1024, page_size * 2048),
         prefer_text=True,
     )
-    rows, next_resume = parse_cdx(payload)
+    rows, next_resume = result.rows, result.resume_key
     if next_resume:
         if next_resume == current.resume_key:
             raise TransientRequestError("CDX returned the same resume key twice", splittable=True)
@@ -647,6 +653,8 @@ def index_archive(
 
     total_windows = sum(len(windows) for _, _, _, windows, _ in tasks)
     completed_windows = 0
+    connection_failure_streak = 0
+    transient_failure_streak = 0
     try:
         for target, target_config, year, default_windows, signature in tasks:
             if stop_event.is_set():
@@ -685,20 +693,35 @@ def index_archive(
                 request_started = time.monotonic()
                 try:
                     if current.strategy == "paged":
-                        batch = _request_paged_batch(client, target_config, target, current, stop_event)
-                        request_seconds = time.monotonic() - request_started
-                        successes = batch.successful
-                        failures = batch.failed
-                        write_started = time.monotonic()
                         received = 0
                         changed = 0
-                        with database:
-                            for result in successes:
-                                received += len(result.rows)
+                        write_seconds = 0.0
+
+                        def store_completed_page(result: PageFetchResult) -> None:
+                            nonlocal received, changed, write_seconds
+                            page_received = len(result.rows)
+                            write_started = time.monotonic()
+                            with database:
                                 changed += upsert_captures(database, result.rows, target_id, signature)
+                            write_seconds += time.monotonic() - write_started
+                            received += page_received
+                            # Release the largest object while sibling requests
+                            # are still in flight instead of retaining a full
+                            # worker batch in memory.
+                            result.rows.clear()
+
+                        batch = _request_paged_batch(
+                            client, target_config, target, current, stop_event, store_completed_page
+                        )
+                        request_seconds = max(0.0, time.monotonic() - request_started - write_seconds)
+                        successes = batch.successful
+                        failures = batch.failed
+                        with database:
                             seen += received
                             if successes:
                                 current.failures = 0
+                                connection_failure_streak = 0
+                                transient_failure_streak = 0
                             if batch.finished:
                                 plan.pending.pop(0)
                                 plan.completed += 1
@@ -708,7 +731,6 @@ def index_archive(
                             if error_id and not failures:
                                 database.execute("UPDATE errors SET resolved=1,last_seen=? WHERE id=?", (utc_now(), error_id))
                                 error_id = None
-                        write_seconds = time.monotonic() - write_started
                         pages_done = len(successes)
                         emit(
                             callback,
@@ -723,6 +745,16 @@ def index_archive(
                             continue
 
                         failure_exc = _paged_failure_error(failures)
+                        if not successes and all(
+                            isinstance(item.error, TransientRequestError) and item.error.connection_failed
+                            for item in failures
+                        ):
+                            # Page workers return failures as results so successful
+                            # siblings can still be committed. A complete connection
+                            # failure must nevertheless enter the operation-wide
+                            # connection circuit instead of being mistaken for one
+                            # repeatedly slow CDX page.
+                            raise failure_exc
                         if max(current.page_failures.values(), default=0) >= 2:
                             # One CDX page can be pathologically expensive even
                             # when its siblings succeed. Do not let that page hold
@@ -797,11 +829,14 @@ def index_archive(
                         continue
 
                     rows, finished = _request_resume(client, target_config, target, current)
+                    connection_failure_streak = 0
+                    transient_failure_streak = 0
                     request_seconds = time.monotonic() - request_started
+                    received = len(rows)
                     write_started = time.monotonic()
                     with database:
                         changed = upsert_captures(database, rows, target_id, signature)
-                        seen += len(rows)
+                        seen += received
                         current.failures = 0
                         if finished:
                             plan.pending.pop(0)
@@ -817,11 +852,16 @@ def index_archive(
                         callback,
                         ProgressEvent(
                             "index",
-                            f"{target} {label}: received {len(rows):,}, stored {changed:,}, seen {seen:,} — network {request_seconds:.1f}s, database {write_seconds:.2f}s",
+                            f"{target} {label}: received {received:,}, stored {changed:,}, seen {seen:,} — network {request_seconds:.1f}s, database {write_seconds:.2f}s",
                             completed_windows,
                             total_windows,
                         ),
                     )
+                    # Do not retain the previous 50k-row page while the next
+                    # response is being downloaded and parsed. Python evaluates
+                    # the next assignment's right-hand side before releasing the
+                    # old local value, which otherwise briefly doubles peak memory.
+                    rows.clear()
                 except Stopped:
                     with database:
                         save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
@@ -832,6 +872,76 @@ def index_archive(
                         exc, callback, completed_windows, total_windows, stop_event,
                     )
                 except TransientRequestError as exc:
+                    if exc.connection_failed:
+                        connection_failure_streak += 1
+                        current.failures += 1
+                        network = target_config.network.normalized()
+                        with database:
+                            error_id = record_error(
+                                database,
+                                "index",
+                                "wayback_connection_unavailable",
+                                f"{target} {label}: {exc}",
+                                retryable=True,
+                            )
+                            _record_network_event(
+                                database,
+                                "connection",
+                                str(exc),
+                                {"streak": connection_failure_streak, "target": target, "window": label},
+                            )
+                            save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                        if connection_failure_streak >= network.connection_failure_pause_threshold:
+                            raise ConnectivityPaused(
+                                f"Archive Scout could not establish a Wayback connection after "
+                                f"{connection_failure_streak} complete multi-backend attempts. "
+                                "The exact index queue was saved; Resume will continue without repeating completed pages."
+                            ) from exc
+                        wait_seconds = min(
+                            15.0,
+                            network.connection_retry_seconds * (2 ** max(0, connection_failure_streak - 1)),
+                        )
+                        emit(
+                            callback,
+                            ProgressEvent(
+                                "network",
+                                f"Wayback connection setup failed. Retrying the same saved request in {wait_seconds:.1f}s "
+                                f"({connection_failure_streak}/{network.connection_failure_pause_threshold})…",
+                                completed_windows,
+                                total_windows,
+                            ),
+                        )
+                        stop_event.wait(wait_seconds)
+                        if stop_event.is_set():
+                            raise Stopped
+                        continue
+                    transient_failure_streak += 1
+                    network = target_config.network.normalized()
+                    no_progress_limit = min(
+                        network.failure_pause_threshold,
+                        4 if exc.timed_out else 6,
+                    )
+                    if transient_failure_streak >= no_progress_limit:
+                        current.failures += 1
+                        with database:
+                            error_id = record_error(
+                                database,
+                                "index",
+                                "transient_index_delay",
+                                f"{target} {label}: {transient_failure_streak} consecutive transient CDX failures without a successful response: {exc}",
+                                retryable=True,
+                            )
+                            _record_network_event(
+                                database,
+                                "no_progress",
+                                str(exc),
+                                {"streak": transient_failure_streak, "target": target, "window": label},
+                            )
+                            save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                        raise ConnectivityPaused(
+                            f"Wayback returned no usable CDX response after {transient_failure_streak} consecutive recovery attempts. "
+                            "Archive Scout saved the exact queue and paused instead of looping indefinitely."
+                        ) from exc
                     if current.strategy == "paged" and current.page_count < 0:
                         # A page-count request should be cheap. If it cannot be
                         # obtained, do not loop on it indefinitely: switch this
@@ -902,10 +1012,19 @@ def index_archive(
                     emit(callback, ProgressEvent("index", f"Indexing stopped on a permanent configuration or local-data error for {target} {label}. Progress was saved.", completed_windows, total_windows))
                     raise
                 except Exception as exc:
-                    error_id = _defer_transient_window(
-                        target_config, database, plan, current, target_id, year, signature, seen, error_id,
-                        exc, callback, completed_windows, total_windows, stop_event,
-                    )
+                    # Programming, parsing, SQLite, and local filesystem errors
+                    # are not network retries. Requeueing them forever hides the
+                    # real defect and can make the interface appear stuck.
+                    with database:
+                        error_id = record_error(
+                            database,
+                            "index",
+                            "unexpected_index_error",
+                            f"{target} {label}: {type(exc).__name__}: {exc}",
+                            retryable=False,
+                        )
+                        save_state(database, target_id, year, signature, encode_plan(plan), False, seen, error_id)
+                    raise
             emit(callback, ProgressEvent("index", f"Finished {target} for {year}", completed_windows, total_windows))
     finally:
         client.close()

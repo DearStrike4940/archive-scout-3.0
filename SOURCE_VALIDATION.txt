@@ -1,25 +1,36 @@
-Archive Scout 3.0.0-beta.1.5 source validation
+Archive Scout 3.0.0-beta.1.6 source validation
 
 Completed locally before packaging:
-- 97 unit, migration, integration, packaging, interface, and workflow regression tests passed under Xvfb
-- python -m compileall completed for archive_scout and tests
+- 113 unit, migration, integration, packaging, interface, and workflow regression tests passed under Xvfb
+- a complete synthetic resume-key index committed 50,000 captures and completed normally
+- a compact 50,000-row parser test and a bounded 50,000-row SQLite insert test passed
+- oversized CDX bodies and parser MemoryError conditions became resumable splittable work
+- complete resume and paged connection failures paused after three saved attempts
+- large explicit text and media retry selections passed with 1,200 IDs without exceeding SQLite parameter limits
+- python compileall completed for archive_scout, tests, and scripts
+- 120 Python files parsed with ast.parse
+- 71 archive_scout modules imported successfully under Xvfb (archive_scout.__main__ excluded because importing it launches the GUI)
 - both GitHub workflow files parsed as YAML
-- Linux and macOS build scripts passed bash syntax validation
-- Beta 1.4 application behavior and database schema were retained
-- the shared CDX request-start interval remained fixed at 0.75 seconds (80 starts per minute)
-- the default CDX page-worker count increased from 6 to 10
-- the default numbered-page block size increased from 6 to 9
-- the default resume-key request size increased from 25,000 to 50,000 rows
-- HTTPX pooled keep-alive retention increased from 45 to 90 seconds
-- the resume-response byte budget now scales with the 50,000-row request size
-- untouched Beta 1.4 defaults migrate to the new values while custom network settings remain unchanged
-- paged and resume-key parameter tests confirmed pageSize=9 and limit=50000
+- Linux shell scripts passed bash syntax validation
+- full GUI/test suite passed under a virtual display
+- no broken symbolic links were present
+- the fixed CDX request-start interval remained 0.75 seconds (80 starts per minute)
+- the 50,000-row resume limit and nine-block numbered pages remained enabled
+- nine-block page concurrency is memory-capped at four resident results; small pages may still use all ten configured workers
+- the database schema remains version 5
 - existing timeout, 429, malformed-CDX, media, analysis, merge, backup, repair, icon, date, signing, external-media, and macOS packaging tests remained passing
 
-Still required or not available locally:
+Focused memory measurement:
+- synthetic payload: 5,977,794 bytes / 50,000 rows
+- former decoded-list/dictionary parser traced peak: 50,423,415 bytes
+- Beta 1.6 compact parser traced peak: 22,824,796 bytes
+- focused parser-allocation reduction: 54.7 percent
+- input payload allocation excluded from both measurements
+
+Still required or unavailable locally:
 - no live Internet Archive stress test was performed
-- no real Windows, Linux, or universal macOS package was built in this container
+- no native Windows, Linux, or universal macOS package was built in this container
 - no native Windows Defender or SmartScreen scan was possible
-- PowerShell was unavailable, so the Windows build script was not executed locally
+- PowerShell was unavailable, so Windows PowerShell build/signing scripts were not executed locally
 - GitHub Actions must run the six-job test matrix and all three native package jobs
-- each generated package should be smoke-tested on real hardware
+- each generated package should be smoke-tested on real hardware, including a proxy/strict-security Windows machine and low-memory macOS hardware

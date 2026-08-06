@@ -76,23 +76,22 @@ class _UnionFind:
 
 def cluster_duplicates(database: sqlite3.Connection, threshold: float = 0.90) -> DuplicateSummary:
     threshold = min(1.0, max(0.5, float(threshold)))
-    rows = database.execute(
-        """
-        SELECT d.id,d.body_text,d.content_hash,d.normalized_hash,c.timestamp,c.original_url
-        FROM documents d JOIN captures c ON c.id=d.capture_id
-        WHERE COALESCE(d.body_text,'')<>''
-        ORDER BY d.id
-        """
-    ).fetchall()
-    document_ids = [int(row["id"]) for row in rows]
-    union = _UnionFind(document_ids)
-    method_for_pair: dict[tuple[int, int], tuple[str, float]] = {}
-
+    document_ids: list[int] = []
     exact: dict[str, list[int]] = defaultdict(list)
-    for row in rows:
+    for row in database.execute(
+        """
+        SELECT id,content_hash,normalized_hash
+        FROM documents WHERE COALESCE(body_text,'')<>'' ORDER BY id
+        """
+    ):
+        document_id = int(row["id"])
+        document_ids.append(document_id)
         key = str(row["normalized_hash"] or row["content_hash"] or "")
         if key:
-            exact[key].append(int(row["id"]))
+            exact[key].append(document_id)
+
+    union = _UnionFind(document_ids)
+    method_for_pair: dict[tuple[int, int], tuple[str, float]] = {}
     for ids in exact.values():
         if len(ids) < 2:
             continue
@@ -101,17 +100,20 @@ def cluster_duplicates(database: sqlite3.Connection, threshold: float = 0.90) ->
             union.union(first, other)
             method_for_pair[(min(first, other), max(first, other))] = ("exact", 1.0)
 
+    # Body text can dominate project memory. Compute each SimHash while its row
+    # is current and retain only the 64-bit result and compact bucket IDs.
     hashes: dict[int, int] = {}
     buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for row in rows:
+    for row in database.execute(
+        "SELECT id,body_text FROM documents WHERE COALESCE(body_text,'')<>'' ORDER BY id"
+    ):
         document_id = int(row["id"])
         value = simhash64(str(row["body_text"] or ""))
         hashes[document_id] = value
         for band in range(4):
             buckets[(band, (value >> (band * 16)) & 0xFFFF)].append(document_id)
 
-    compared: set[tuple[int, int]] = set()
-    for ids in buckets.values():
+    for (band, _chunk), ids in buckets.items():
         if len(ids) < 2:
             continue
         # Avoid pathological buckets created by empty or boilerplate-only pages.
@@ -119,10 +121,16 @@ def cluster_duplicates(database: sqlite3.Connection, threshold: float = 0.90) ->
             ids = ids[:2000]
         for index, left in enumerate(ids):
             for right in ids[index + 1:]:
-                pair = (min(left, right), max(left, right))
-                if pair in compared:
+                # The same pair can share multiple 16-bit bands. Process it only
+                # in the lowest shared band instead of retaining a project-wide
+                # set containing every candidate pair.
+                if any(
+                    ((hashes[left] >> (prior * 16)) & 0xFFFF)
+                    == ((hashes[right] >> (prior * 16)) & 0xFFFF)
+                    for prior in range(band)
+                ):
                     continue
-                compared.add(pair)
+                pair = (min(left, right), max(left, right))
                 similarity = hamming_similarity(hashes[left], hashes[right])
                 if similarity >= threshold:
                     union.union(left, right)
@@ -143,7 +151,10 @@ def cluster_duplicates(database: sqlite3.Connection, threshold: float = 0.90) ->
             similarities: dict[int, float] = {representative: 1.0}
             for document_id in ids[1:]:
                 pair = (min(representative, document_id), max(representative, document_id))
-                method, similarity = method_for_pair.get(pair, ("near", hamming_similarity(hashes[representative], hashes[document_id])))
+                method, similarity = method_for_pair.get(
+                    pair,
+                    ("near", hamming_similarity(hashes[representative], hashes[document_id])),
+                )
                 if method != "exact":
                     all_exact = False
                 similarities[document_id] = similarity
@@ -153,14 +164,14 @@ def cluster_duplicates(database: sqlite3.Connection, threshold: float = 0.90) ->
                 (method, representative, utc_now()),
             )
             group_id = int(cursor.lastrowid)
-            for document_id in ids:
-                database.execute(
-                    "INSERT INTO duplicate_members(group_id,document_id,similarity) VALUES(?,?,?)",
-                    (group_id, document_id, similarities.get(document_id, 1.0)),
-                )
+            database.executemany(
+                "INSERT INTO duplicate_members(group_id,document_id,similarity) VALUES(?,?,?)",
+                ((group_id, document_id, similarities.get(document_id, 1.0)) for document_id in ids),
+            )
             if method == "exact":
                 summary.exact_groups += 1
             else:
                 summary.near_groups += 1
             summary.grouped_documents += len(ids)
     return summary
+

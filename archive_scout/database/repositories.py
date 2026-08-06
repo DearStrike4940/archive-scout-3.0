@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from ..constants import REVIEW_STATUSES
@@ -24,21 +25,56 @@ def get_or_create_target(database: sqlite3.Connection, pattern: str, settings: d
     return int(cursor.lastrowid)
 
 
+def _cdx_value(row: Mapping[str, object] | Sequence[object], name: str) -> str:
+    if isinstance(row, Mapping):
+        value = row.get(name, "")
+    else:
+        positions = {
+            "timestamp": 0,
+            "original": 1,
+            "mimetype": 2,
+            "statuscode": 3,
+            "digest": 4,
+            "length": 5,
+        }
+        index = positions[name]
+        value = row[index] if index < len(row) else ""
+    return str(value if value is not None else "")
+
+
+def cdx_row_to_dict(row: Mapping[str, object] | Sequence[object]) -> dict[str, str]:
+    return {
+        "timestamp": _cdx_value(row, "timestamp"),
+        "original": _cdx_value(row, "original"),
+        "mimetype": _cdx_value(row, "mimetype"),
+        "statuscode": _cdx_value(row, "statuscode"),
+        "digest": _cdx_value(row, "digest"),
+        "length": _cdx_value(row, "length"),
+    }
+
+
+def _safe_length(value: str) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _capture_values(
-    row: dict[str, str],
+    row: Mapping[str, object] | Sequence[object],
     target_id: int,
     query_signature: str,
     now: str,
 ) -> tuple:
     return (
-        row["original"],
-        row["timestamp"],
+        _cdx_value(row, "original"),
+        _cdx_value(row, "timestamp"),
         target_id,
         query_signature,
-        row.get("mimetype", ""),
-        row.get("statuscode", ""),
-        row.get("digest", ""),
-        int(row.get("length") or 0),
+        _cdx_value(row, "mimetype"),
+        _cdx_value(row, "statuscode"),
+        _cdx_value(row, "digest"),
+        _safe_length(_cdx_value(row, "length")),
         "pending",
         now,
         now,
@@ -47,17 +83,13 @@ def _capture_values(
 
 def upsert_captures(
     database: sqlite3.Connection,
-    rows: list[dict[str, str]],
+    rows: Iterable[Mapping[str, object] | Sequence[object]],
     target_id: int,
     query_signature: str,
 ) -> int:
-    if not rows:
-        return 0
     now = utc_now()
-    values = [_capture_values(row, target_id, query_signature, now) for row in rows]
     before = database.total_changes
-    database.executemany(
-        """
+    statement = """
         INSERT INTO captures(
             original_url,timestamp,target_id,query_signature,mimetype,statuscode,digest,length,state,created_at,updated_at
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
@@ -68,9 +100,15 @@ def upsert_captures(
             digest=excluded.digest,
             length=excluded.length,
             updated_at=excluded.updated_at
-        """,
-        values,
-    )
+        """
+    batch: list[tuple] = []
+    for row in rows:
+        batch.append(_capture_values(row, target_id, query_signature, now))
+        if len(batch) >= 2000:
+            database.executemany(statement, batch)
+            batch.clear()
+    if batch:
+        database.executemany(statement, batch)
     return database.total_changes - before
 
 
@@ -350,10 +388,14 @@ def resolve_errors(
 def ignore_errors(database: sqlite3.Connection, error_ids: list[int], ignored: bool = True) -> None:
     if not error_ids:
         return
-    database.execute(
-        "UPDATE errors SET ignored=?,last_seen=? WHERE id IN (" + ",".join("?" for _ in error_ids) + ")",
-        (int(ignored), utc_now(), *error_ids),
-    )
+    now = utc_now()
+    values = [int(value) for value in error_ids]
+    for start in range(0, len(values), 500):
+        chunk = values[start:start + 500]
+        database.execute(
+            "UPDATE errors SET ignored=?,last_seen=? WHERE id IN (" + ",".join("?" for _ in chunk) + ")",
+            (int(ignored), now, *chunk),
+        )
 
 
 def list_errors(database: sqlite3.Connection, unresolved_only: bool = True) -> list[sqlite3.Row]:
@@ -483,38 +525,15 @@ def get_or_create_media_target(database: sqlite3.Connection, pattern: str) -> in
 
 def upsert_media_captures(
     database: sqlite3.Connection,
-    items: list[tuple[dict[str, str], str, str]],
+    items: Iterable[tuple[Mapping[str, object] | Sequence[object], str, str]],
     target_id: int | None,
     query_signature: str,
     source_document_id: int | None = None,
     source_type: str = "cdx",
 ) -> int:
-    if not items:
-        return 0
     now = utc_now()
-    values = [
-        (
-            row["original"],
-            row["timestamp"],
-            target_id,
-            source_document_id,
-            source_type,
-            query_signature,
-            media_kind,
-            extension,
-            row.get("mimetype", ""),
-            row.get("statuscode", ""),
-            row.get("digest", ""),
-            int(row.get("length") or 0),
-            "pending",
-            now,
-            now,
-        )
-        for row, media_kind, extension in items
-    ]
     before = database.total_changes
-    database.executemany(
-        """
+    statement = """
         INSERT INTO media_captures(
             original_url,timestamp,target_id,source_document_id,source_type,query_signature,media_kind,extension,
             mimetype,statuscode,digest,length,state,created_at,updated_at
@@ -530,9 +549,33 @@ def upsert_media_captures(
             digest=excluded.digest,
             length=excluded.length,
             updated_at=excluded.updated_at
-        """,
-        values,
-    )
+        """
+    batch: list[tuple] = []
+    for row, media_kind, extension in items:
+        batch.append(
+            (
+                _cdx_value(row, "original"),
+                _cdx_value(row, "timestamp"),
+                target_id,
+                source_document_id,
+                source_type,
+                query_signature,
+                media_kind,
+                extension,
+                _cdx_value(row, "mimetype"),
+                _cdx_value(row, "statuscode"),
+                _cdx_value(row, "digest"),
+                _safe_length(_cdx_value(row, "length")),
+                "pending",
+                now,
+                now,
+            )
+        )
+        if len(batch) >= 2000:
+            database.executemany(statement, batch)
+            batch.clear()
+    if batch:
+        database.executemany(statement, batch)
     return database.total_changes - before
 
 

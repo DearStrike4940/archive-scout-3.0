@@ -103,7 +103,8 @@ def merge_projects(
             for row in source.execute("SELECT * FROM targets ORDER BY id"):
                 target_map[int(row["id"])] = get_or_create_target(database, str(row["pattern"]))
 
-            capture_rows = source.execute("SELECT * FROM captures ORDER BY id").fetchall()
+            capture_total = int(source.execute("SELECT COUNT(*) FROM captures").fetchone()[0])
+            capture_rows = source.execute("SELECT * FROM captures ORDER BY id")
             for index, row in enumerate(capture_rows, 1):
                 if stop_event.is_set():
                     raise Stopped
@@ -128,7 +129,7 @@ def merge_projects(
                 capture_map[int(row["id"])] = int(merged["id"])
                 summary["captures"] += 1
                 if index % 1000 == 0:
-                    emit(f"Merged {index:,}/{len(capture_rows):,} captures", index, len(capture_rows))
+                    emit(f"Merged {index:,}/{capture_total:,} captures", index, capture_total)
 
             for row in source.execute("SELECT * FROM documents ORDER BY id"):
                 old_capture = int(row["capture_id"])

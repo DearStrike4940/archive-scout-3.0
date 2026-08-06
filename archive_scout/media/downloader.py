@@ -43,7 +43,7 @@ def media_path(root: Path, row: sqlite3.Row, preserve_paths: bool) -> Path:
 def fetch_media(row: sqlite3.Row, config: ProjectConfig, client: HttpClient) -> dict:
     response = client.get(replay_url(row["timestamp"], row["original_url"]), config.media.max_file_bytes)
     data = response["data"]
-    content_type = response["headers"].get("Content-Type", "").casefold()
+    content_type = (response["headers"].get("content-type") or response["headers"].get("Content-Type") or "").casefold()
     if not data:
         raise RuntimeError("empty media response")
     if "text/html" in content_type:
@@ -65,6 +65,35 @@ def fetch_media(row: sqlite3.Row, config: ProjectConfig, client: HttpClient) -> 
     }
 
 
+def iter_media_download_rows(
+    database: sqlite3.Connection,
+    clauses: list[str],
+    params: list[object],
+    batch_size: int = 1000,
+):
+    """Stream selected media rows using keyset pagination."""
+    where = " AND ".join(clauses)
+    total = int(database.execute(
+        "SELECT COUNT(*) FROM media_captures WHERE " + where, params
+    ).fetchone()[0])
+
+    def rows():
+        last_id = 0
+        while True:
+            batch = database.execute(
+                "SELECT * FROM media_captures WHERE " + where
+                + " AND id>? ORDER BY id LIMIT ?",
+                [*params, last_id, max(1, int(batch_size))],
+            ).fetchall()
+            if not batch:
+                return
+            for row in batch:
+                last_id = int(row["id"])
+                yield row
+
+    return total, rows()
+
+
 def download_media(
     config: ProjectConfig,
     database: sqlite3.Connection,
@@ -75,20 +104,26 @@ def download_media(
 ) -> None:
     clauses: list[str] = []
     params: list[object] = []
+    database.execute("DROP TABLE IF EXISTS temp.archive_scout_media_selection")
     if media_capture_ids:
-        clauses.append("id IN (" + ",".join("?" for _ in media_capture_ids) + ")")
-        params.extend(media_capture_ids)
+        database.execute(
+            "CREATE TEMP TABLE archive_scout_media_selection(id INTEGER PRIMARY KEY) WITHOUT ROWID"
+        )
+        database.executemany(
+            "INSERT OR IGNORE INTO archive_scout_media_selection(id) VALUES(?)",
+            ((int(value),) for value in media_capture_ids),
+        )
+        clauses.append(
+            "EXISTS (SELECT 1 FROM archive_scout_media_selection s WHERE s.id=media_captures.id)"
+        )
     else:
         clauses.extend(["query_signature=?", "download_attempts<?"])
         params.extend([media_query_signature(config), config.max_attempts])
     if states:
         clauses.append("state IN (" + ",".join("?" for _ in states) + ")")
         params.extend(states)
-    rows = database.execute(
-        "SELECT * FROM media_captures WHERE " + " AND ".join(clauses) + " ORDER BY timestamp,original_url", params
-    ).fetchall()
-    total = len(rows)
-    if not rows:
+    total, row_iter = iter_media_download_rows(database, clauses, params)
+    if not total:
         if callback:
             callback(ProgressEvent("media_download", "No media captures to download.", 0, 0))
         return
@@ -126,85 +161,88 @@ def download_media(
     complete = errors = 0
     started = time.monotonic()
     max_inflight = max(config.workers, config.workers * 2)
-    row_iter = iter(rows)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.workers, thread_name_prefix="archive-media") as pool:
-        futures: dict[concurrent.futures.Future, sqlite3.Row] = {}
-
-        def submit_next() -> bool:
-            try:
-                row = next(row_iter)
-            except StopIteration:
-                return False
-            if stop_event.is_set():
-                raise Stopped
-            with database:
-                database.execute(
-                    "UPDATE media_captures SET state='downloading',download_attempts=download_attempts+1,updated_at=? WHERE id=?",
-                    (utc_now(), row["id"]),
-                )
-            futures[pool.submit(fetch_media, row, config, client)] = row
-            return True
-
-        while len(futures) < max_inflight and submit_next():
-            pass
-
-        while futures:
-            if stop_event.is_set():
-                for pending in futures:
-                    pending.cancel()
-                raise Stopped
-            done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
-            for future in done:
-                row = futures.pop(future)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.workers, thread_name_prefix="archive-media") as pool:
+            futures: dict[concurrent.futures.Future, sqlite3.Row] = {}
+    
+            def submit_next() -> bool:
                 try:
-                    result = future.result()
-                    with database:
-                        save_media_success(
-                            database, result["id"], result["path"], result["bytes"], result["hash"], result["status"], result["final_url"]
-                        )
-                except RateLimitDeferred:
-                    stop_event.set()
-                    with database:
-                        database.execute(
-                            """UPDATE media_captures SET state='pending',
-                               download_attempts=CASE WHEN download_attempts>0 THEN download_attempts-1 ELSE 0 END,
-                               updated_at=? WHERE state='downloading' OR id=?""",
-                            (utc_now(), row["id"]),
-                        )
+                    row = next(row_iter)
+                except StopIteration:
+                    return False
+                if stop_event.is_set():
+                    raise Stopped
+                with database:
+                    database.execute(
+                        "UPDATE media_captures SET state='downloading',download_attempts=download_attempts+1,updated_at=? WHERE id=?",
+                        (utc_now(), row["id"]),
+                    )
+                futures[pool.submit(fetch_media, row, config, client)] = row
+                return True
+    
+            while len(futures) < max_inflight and submit_next():
+                pass
+    
+            while futures:
+                if stop_event.is_set():
                     for pending in futures:
                         pending.cancel()
-                    raise
-                except Stopped:
-                    with database:
-                        database.execute("UPDATE media_captures SET state='pending',updated_at=? WHERE id=?", (utc_now(), row["id"]))
-                    raise
-                except Exception as exc:
-                    errors += 1
-                    category, status, retryable = classify_exception(exc)
-                    if str(exc) == "invalid_wayback_replay":
-                        category, retryable = "invalid_wayback_replay", False
-                    with database:
-                        database.execute(
-                            "UPDATE media_captures SET state='error',http_status=?,updated_at=? WHERE id=?",
-                            (status, utc_now(), row["id"]),
-                        )
-                        record_error(
-                            database, "media_download", category, repr(exc), media_capture_id=int(row["id"]),
-                            http_status=status, retryable=retryable
-                        )
-                complete += 1
-                elapsed = max(0.001, time.monotonic() - started)
-                if callback:
-                    callback(ProgressEvent(
-                        "media_download",
-                        f"Media {complete:,}/{total:,}; errors {errors:,}; {complete/elapsed:.1f}/s",
-                        complete, total,
-                        {"errors": errors},
-                    ))
-                while len(futures) < max_inflight and submit_next():
-                    pass
-
+                    raise Stopped
+                done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    row = futures.pop(future)
+                    try:
+                        result = future.result()
+                        with database:
+                            save_media_success(
+                                database, result["id"], result["path"], result["bytes"], result["hash"], result["status"], result["final_url"]
+                            )
+                    except RateLimitDeferred:
+                        stop_event.set()
+                        with database:
+                            database.execute(
+                                """UPDATE media_captures SET state='pending',
+                                   download_attempts=CASE WHEN download_attempts>0 THEN download_attempts-1 ELSE 0 END,
+                                   updated_at=? WHERE state='downloading' OR id=?""",
+                                (utc_now(), row["id"]),
+                            )
+                        for pending in futures:
+                            pending.cancel()
+                        raise
+                    except Stopped:
+                        with database:
+                            database.execute("UPDATE media_captures SET state='pending',updated_at=? WHERE id=?", (utc_now(), row["id"]))
+                        raise
+                    except Exception as exc:
+                        errors += 1
+                        category, status, retryable = classify_exception(exc)
+                        if str(exc) == "invalid_wayback_replay":
+                            category, retryable = "invalid_wayback_replay", False
+                        with database:
+                            database.execute(
+                                "UPDATE media_captures SET state='error',http_status=?,updated_at=? WHERE id=?",
+                                (status, utc_now(), row["id"]),
+                            )
+                            record_error(
+                                database, "media_download", category, repr(exc), media_capture_id=int(row["id"]),
+                                http_status=status, retryable=retryable
+                            )
+                    complete += 1
+                    elapsed = max(0.001, time.monotonic() - started)
+                    if callback:
+                        callback(ProgressEvent(
+                            "media_download",
+                            f"Media {complete:,}/{total:,}; errors {errors:,}; {complete/elapsed:.1f}/s",
+                            complete, total,
+                            {"errors": errors},
+                        ))
+                    while len(futures) < max_inflight and submit_next():
+                        pass
+    
+    
+    finally:
+        client.close()
 
 def retry_media_errors(
     config: ProjectConfig,
@@ -216,14 +254,27 @@ def retry_media_errors(
     clauses = ["resolved=0", "ignored=0", "retryable=1", "media_capture_id IS NOT NULL"]
     params: list[object] = []
     selected = media_capture_ids if media_capture_ids is not None else config.retry_media_capture_ids
+    database.execute("DROP TABLE IF EXISTS temp.archive_scout_media_retry_selection")
     if selected:
-        clauses.append("media_capture_id IN (" + ",".join("?" for _ in selected) + ")")
-        params.extend(int(value) for value in selected)
-    rows = database.execute(
-        "SELECT DISTINCT media_capture_id FROM errors WHERE " + " AND ".join(clauses) + " ORDER BY media_capture_id",
-        params,
-    ).fetchall()
-    ids = [int(row[0]) for row in rows]
+        database.execute(
+            "CREATE TEMP TABLE archive_scout_media_retry_selection(id INTEGER PRIMARY KEY) WITHOUT ROWID"
+        )
+        database.executemany(
+            "INSERT OR IGNORE INTO archive_scout_media_retry_selection(id) VALUES(?)",
+            ((int(value),) for value in selected),
+        )
+        clauses.append(
+            "EXISTS (SELECT 1 FROM archive_scout_media_retry_selection s WHERE s.id=errors.media_capture_id)"
+        )
+    ids = [
+        int(row[0])
+        for row in database.execute(
+            "SELECT DISTINCT media_capture_id FROM errors WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY media_capture_id",
+            params,
+        )
+    ]
     if callback:
         callback(ProgressEvent("media_retry", f"Retrying {len(ids):,} errored media captures"))
     if ids:

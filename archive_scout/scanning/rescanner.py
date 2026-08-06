@@ -22,24 +22,44 @@ def rescan_keyword_sets(
 ) -> None:
     if not jobs or any(not job.patterns for job in jobs):
         raise ValueError("at least one keyword rule is required in every selected keyword set")
+    clauses: list[str] = []
+    params: list[object] = []
+    database.execute("DROP TABLE IF EXISTS temp.archive_scout_document_selection")
     if document_ids:
-        placeholders = ",".join("?" for _ in document_ids)
-        rows = database.execute(
-            f"""
-            SELECT d.*,c.original_url,c.id AS capture_id FROM documents d
-            JOIN captures c ON c.id=d.capture_id
-            WHERE d.id IN ({placeholders}) ORDER BY d.id
-            """,
-            document_ids,
-        ).fetchall()
-    else:
-        rows = database.execute(
-            """
-            SELECT d.*,c.original_url,c.id AS capture_id FROM documents d
-            JOIN captures c ON c.id=d.capture_id ORDER BY d.id
-            """
-        ).fetchall()
-    total = len(rows)
+        database.execute(
+            "CREATE TEMP TABLE archive_scout_document_selection(id INTEGER PRIMARY KEY) WITHOUT ROWID"
+        )
+        database.executemany(
+            "INSERT OR IGNORE INTO archive_scout_document_selection(id) VALUES(?)",
+            ((int(value),) for value in document_ids),
+        )
+        clauses.append(
+            "EXISTS (SELECT 1 FROM archive_scout_document_selection s WHERE s.id=d.id)"
+        )
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    total = int(database.execute(
+        "SELECT COUNT(*) FROM documents d JOIN captures c ON c.id=d.capture_id" + where,
+        params,
+    ).fetchone()[0])
+
+    def iter_rows():
+        last_id = 0
+        while True:
+            page_clauses = [*clauses, "d.id>?"]
+            batch = database.execute(
+                """
+                SELECT d.*,c.original_url,c.id AS capture_id FROM documents d
+                JOIN captures c ON c.id=d.capture_id
+                WHERE """ + " AND ".join(page_clauses) + " ORDER BY d.id LIMIT 500",
+                [*params, last_id],
+            ).fetchall()
+            if not batch:
+                return
+            for row in batch:
+                last_id = int(row["id"])
+                yield row
+
+    rows = iter_rows()
     for index, row in enumerate(rows, 1):
         if stop_event.is_set():
             raise Stopped

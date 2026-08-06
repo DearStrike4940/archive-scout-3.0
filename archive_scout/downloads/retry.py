@@ -25,16 +25,25 @@ def retry_error_urls(
     if config.retry_error_categories:
         clauses.append("e.category IN (" + ",".join("?" for _ in config.retry_error_categories) + ")")
         params.extend(config.retry_error_categories)
+    database.execute("DROP TABLE IF EXISTS temp.archive_scout_retry_selection")
     if config.retry_capture_ids:
-        clauses.append("e.capture_id IN (" + ",".join("?" for _ in config.retry_capture_ids) + ")")
-        params.extend(config.retry_capture_ids)
+        database.execute(
+            "CREATE TEMP TABLE archive_scout_retry_selection(id INTEGER PRIMARY KEY) WITHOUT ROWID"
+        )
+        database.executemany(
+            "INSERT OR IGNORE INTO archive_scout_retry_selection(id) VALUES(?)",
+            ((int(value),) for value in config.retry_capture_ids),
+        )
+        clauses.append(
+            "EXISTS (SELECT 1 FROM archive_scout_retry_selection s WHERE s.id=e.capture_id)"
+        )
     rows = database.execute(
         """
         SELECT e.capture_id,MAX(e.document_id) AS document_id,GROUP_CONCAT(DISTINCT e.operation) AS operations,MAX(d.path) AS path
         FROM errors e LEFT JOIN documents d ON d.id=e.document_id
         WHERE """ + " AND ".join(clauses) + " GROUP BY e.capture_id ORDER BY e.capture_id",
         params,
-    ).fetchall()
+    )
     local_document_ids: list[int] = []
     download_capture_ids: list[int] = []
     for row in rows:

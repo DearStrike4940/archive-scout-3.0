@@ -1,48 +1,39 @@
-# Archive Scout 3.0 Beta 1.4
+# Archive Scout 3.0 Beta 1.6
 
-Beta 1.4 stays deliberately close to Beta 1.2.1 and Beta 1.3.1. The core CDX indexing, timeout recovery, networking, database, text downloading, scanning, and existing media behavior are unchanged.
+Beta 1.6 is a whole-repository reliability and large-project optimization pass. It keeps the Beta 1.5 request-rate envelope and existing user-facing workflows while addressing the two zero-tolerance failures reported in real use: crashes around 50,000 snapshots and indexing sessions that never move beyond repeated Wayback contact attempts.
 
-## Application icon
+## 50,000-snapshot stability
 
-The supplied Archive Scout icon is bundled as PNG, Windows ICO, and macOS ICNS assets. The GUI loads the PNG at runtime, Windows packages embed the ICO, macOS packages embed the ICNS, and Linux packages use the PNG. The PNG has a transparent background outside the black circular badge.
+Bulk CDX responses now follow a compact path from the network into SQLite. Line-oriented output is parsed directly into fixed tuples, database values are generated in bounded batches, and a numbered page is written and released as soon as it completes. The raw response, a full decoded copy, a list-of-lists, a list-of-dictionaries, and a second database-values list no longer coexist for the same 50,000 rows.
 
-## Date input fix
+Large nine-block pages use a memory-aware maximum of four resident page workers. Smaller page configurations can still use all ten workers. The global 0.75-second request-start interval remains unchanged, so the change protects memory without adding artificial delay to request starts.
 
-The CDX date parser now accepts the existing compact formats plus common user-entered formats:
+Text-download selection, media-download selection, and local rescanning now stream through SQLite instead of loading the complete project into Python lists. Media earliest/latest selection is performed by SQLite rather than grouping every media row in memory.
 
-```text
-YYYY
-YYYYMM
-YYYYMMDD
-YYYYMMDDhhmmss
-MM/DD/YYYY
-MM-DD-YYYY
-YYYY-MM-DD
-YYYY/MM/DD
-```
+## Connection and no-progress recovery
 
-For example, `09/01/2008` becomes `20080901000000`, and an end date of `12/31/2009` becomes `20091231235959`. Invalid dates are rejected with a readable message before the worker starts.
+A complete DNS, proxy, TLS, or connection-setup failure now returns directly to the saved operation queue after the available independent HTTP backends have been tried. Archive Scout retries that exact request briefly and pauses after three complete failures. It no longer repeats the same host-level failure against every alternate CDX path or rotates through all date windows indefinitely.
 
-## External embedded media after text scanning
+Repeated read timeouts and retryable HTTP failures are protected by an operation-wide no-progress watchdog. Successful responses, including valid empty result windows, reset the watchdog. When no usable response arrives after the bounded recovery attempts, the exact queue is saved and the operation enters the existing paused state.
 
-A new operation named **Index, download, scan, then download external embedded media** runs in this order:
+The CDX connect-timeout ceiling is 15 seconds in this release. This affects only failed connection setup; it does not shorten the read timeout for large responses or slow successful requests.
 
-1. Index the selected text targets.
-2. Download and scan the selected text captures.
-3. Read the completed documents' extracted URL lists.
-4. Keep only external image/video links matching the Media extension settings.
-5. Look up those exact URLs in Wayback.
-6. Apply the selected earliest/latest/all snapshot strategy.
-7. Download the queued external media only after discovery finishes.
+## Repository-wide safeguards
 
-This uses the existing media tables, retries, reports, limits, and download engine. It does not run a broad CDX media crawl of every external host.
+- Unexpected local and programming errors are recorded once and surfaced instead of being mislabeled as transient network errors.
+- Capture and media upserts use bounded 2,000-row batches.
+- Oversized CDX bodies and parser memory pressure are converted into resumable smaller saved work instead of terminating the process.
+- Full-text repair, project integrity checks, scan comparisons, external-asset lookup, retry selections, duplicate clustering, reports, provenance, project merge, and migration paths were audited and changed to bounded or streaming processing where project-sized lists were unnecessary.
+- Large explicit capture/media retry selections and error selections no longer depend on SQLite's platform-specific parameter limit.
+- Composite SQLite indexes accelerate pending download selection.
+- The GUI Activity log retains a bounded recent history, and event bursts yield back to Tk so the interface remains responsive.
+- Legacy/mock clients that expose only `get_cdx_any` remain supported.
+- The database schema remains version 5 and existing projects require no destructive migration.
 
-## Windows trust and signing
+## Preserved behavior
 
-The Windows application remains a PyInstaller onedir package with UPX disabled. Tagged releases require Azure Artifact Signing when configured. The build now separates build and packaging stages: the executable is built, signed, and then packaged only after `Get-AuthenticodeSignature` reports `Valid`.
+Beta 1.5's 50,000-row resume requests, nine CDX blocks per numbered page, ten configured page workers, fixed 0.75-second shared request-start spacing, combined media indexing, live Dashboard, date formats, icon, external embedded-media operation, and Windows signing workflow remain in place.
 
-The Windows package includes `README-WINDOWS.txt` with checksum verification, Digital Signatures verification, Mark-of-the-Web / Unblock instructions, and Microsoft Defender false-positive submission steps. Signing and submission reduce false positives but cannot guarantee a particular antivirus determination.
+## Validation boundary
 
-## Dashboard
-
-The read-only live Dashboard counters remain enabled and continue updating during active and idle use without requiring manual refreshes.
+The repository was compile-checked, parsed, tested, and packaged in the development container. A live Internet Archive stress test, native Windows/macOS build, Defender scan, and long real-world 50,000+ snapshot run still require GitHub Actions and physical machines.

@@ -36,23 +36,20 @@ def _summary(earlier: str, later: str) -> dict:
 
 
 def compare_snapshots(database: sqlite3.Connection) -> DiffSummary:
-    rows = database.execute(
-        """
-        SELECT c.id AS capture_id,c.original_url,c.timestamp,d.body_text
-        FROM captures c JOIN documents d ON d.id=c.document_id
-        WHERE c.state='downloaded'
-        ORDER BY c.original_url,c.timestamp,c.id
-        """
-    ).fetchall()
-    grouped: dict[str, list[sqlite3.Row]] = defaultdict(list)
-    for row in rows:
-        grouped[str(row["original_url"])].append(row)
     summary = DiffSummary()
+    previous: sqlite3.Row | None = None
     with database:
         database.execute("DELETE FROM snapshot_diffs")
-        for items in grouped.values():
-            for earlier, later in zip(items, items[1:]):
-                result = _summary(str(earlier["body_text"] or ""), str(later["body_text"] or ""))
+        for row in database.execute(
+            """
+            SELECT c.id AS capture_id,c.original_url,c.timestamp,d.body_text
+            FROM captures c JOIN documents d ON d.id=c.document_id
+            WHERE c.state='downloaded'
+            ORDER BY c.original_url,c.timestamp,c.id
+            """
+        ):
+            if previous is not None and previous["original_url"] == row["original_url"]:
+                result = _summary(str(previous["body_text"] or ""), str(row["body_text"] or ""))
                 database.execute(
                     """
                     INSERT INTO snapshot_diffs(earlier_capture_id,later_capture_id,summary_json,created_at)
@@ -60,11 +57,12 @@ def compare_snapshots(database: sqlite3.Connection) -> DiffSummary:
                     ON CONFLICT(earlier_capture_id,later_capture_id) DO UPDATE SET
                         summary_json=excluded.summary_json,created_at=excluded.created_at
                     """,
-                    (earlier["capture_id"], later["capture_id"], json.dumps(result, ensure_ascii=False), utc_now()),
+                    (previous["capture_id"], row["capture_id"], json.dumps(result, ensure_ascii=False), utc_now()),
                 )
                 summary.compared_pairs += 1
                 if result["similarity"] < 0.999999:
                     summary.changed_pairs += 1
+            previous = row
     return summary
 
 
@@ -72,35 +70,57 @@ def build_first_appearances(database: sqlite3.Connection, queries: list[str]) ->
     queries = list(dict.fromkeys(value.strip() for value in queries if value.strip()))
     if not queries:
         return 0
-    rows = database.execute(
-        """
-        SELECT c.id AS capture_id,c.original_url,c.timestamp,d.title,d.body_text,d.links_json
-        FROM captures c JOIN documents d ON d.id=c.document_id
-        ORDER BY c.original_url,c.timestamp,c.id
-        """
-    ).fetchall()
-    grouped: dict[str, list[sqlite3.Row]] = defaultdict(list)
-    for row in rows:
-        grouped[str(row["original_url"])].append(row)
+    needles = [(query, query.casefold()) for query in queries]
     count = 0
+
+    def flush(original_url: str | None, matches: dict[str, tuple[sqlite3.Row, sqlite3.Row]]) -> int:
+        if original_url is None or not matches:
+            return 0
+        database.executemany(
+            """
+            INSERT INTO first_appearances(
+                query,original_url,first_capture_id,first_timestamp,last_capture_id,last_timestamp,created_at
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                (
+                    query,
+                    original_url,
+                    first["capture_id"],
+                    first["timestamp"],
+                    last["capture_id"],
+                    last["timestamp"],
+                    utc_now(),
+                )
+                for query, (first, last) in matches.items()
+            ),
+        )
+        return len(matches)
+
     with database:
         database.execute("DELETE FROM first_appearances")
-        for original_url, items in grouped.items():
-            for query in queries:
-                needle = query.casefold()
-                matching = [
-                    row for row in items
-                    if needle in (" ".join((str(row["title"] or ""), str(row["body_text"] or ""), str(row["links_json"] or "")))).casefold()
-                ]
-                if not matching:
+        current_url: str | None = None
+        matches: dict[str, tuple[sqlite3.Row, sqlite3.Row]] = {}
+        for row in database.execute(
+            """
+            SELECT c.id AS capture_id,c.original_url,c.timestamp,d.title,d.body_text,d.links_json
+            FROM captures c JOIN documents d ON d.id=c.document_id
+            ORDER BY c.original_url,c.timestamp,c.id
+            """
+        ):
+            original_url = str(row["original_url"])
+            if current_url is not None and original_url != current_url:
+                count += flush(current_url, matches)
+                matches.clear()
+            current_url = original_url
+            haystack = " ".join(
+                (str(row["title"] or ""), str(row["body_text"] or ""), str(row["links_json"] or ""))
+            ).casefold()
+            for query, needle in needles:
+                if needle not in haystack:
                     continue
-                first, last = matching[0], matching[-1]
-                database.execute(
-                    """
-                    INSERT INTO first_appearances(query,original_url,first_capture_id,first_timestamp,last_capture_id,last_timestamp,created_at)
-                    VALUES(?,?,?,?,?,?,?)
-                    """,
-                    (query, original_url, first["capture_id"], first["timestamp"], last["capture_id"], last["timestamp"], utc_now()),
-                )
-                count += 1
+                first, _last = matches.get(query, (row, row))
+                matches[query] = (first, row)
+        count += flush(current_url, matches)
     return count
+

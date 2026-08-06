@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS captures(
 CREATE INDEX IF NOT EXISTS captures_state_idx ON captures(state,download_attempts,timestamp);
 CREATE INDEX IF NOT EXISTS captures_original_idx ON captures(original_url,timestamp);
 CREATE INDEX IF NOT EXISTS captures_signature_idx ON captures(query_signature,timestamp);
+CREATE INDEX IF NOT EXISTS captures_download_idx ON captures(query_signature,state,download_attempts,id);
 CREATE TABLE IF NOT EXISTS documents(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     capture_id INTEGER NOT NULL UNIQUE,
@@ -270,6 +271,7 @@ CREATE TABLE IF NOT EXISTS media_captures(
 );
 CREATE INDEX IF NOT EXISTS media_captures_state_idx ON media_captures(state,download_attempts,timestamp);
 CREATE INDEX IF NOT EXISTS media_captures_url_idx ON media_captures(original_url,timestamp);
+CREATE INDEX IF NOT EXISTS media_captures_signature_idx ON media_captures(query_signature,state,download_attempts,id);
 CREATE TABLE IF NOT EXISTS media_index_state(
     target_id INTEGER NOT NULL,
     extension TEXT NOT NULL,

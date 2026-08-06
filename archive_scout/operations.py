@@ -292,8 +292,13 @@ def run_project(
         emit(callback, ProgressEvent("stopped", "Stopped. Progress was saved and can be resumed."))
         raise
     except Exception as exc:
-        if jobs:
-            with database:
+        # Never leave active queue rows stranded after a local programming,
+        # parsing, database, or filesystem failure. They remain resumable even
+        # before the project is reopened and crash-recovery runs.
+        with database:
+            database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
+            database.execute("UPDATE media_captures SET state='pending' WHERE state='downloading'")
+            if jobs:
                 finish_jobs(database, jobs, "failed")
         finish_operation_run(database, operation_run_id, "failed", f"{type(exc).__name__}: {exc}")
         database.commit()

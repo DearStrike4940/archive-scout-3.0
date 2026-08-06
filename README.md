@@ -8,13 +8,31 @@ One repository produces builds for Windows x64, Linux x64, and universal macOS f
 
 ## Downloads
 
-- [Download for Windows x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.6/ArchiveScout-Windows-x64.zip)
-- [Download for Linux x64](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.6/ArchiveScout-Linux-x64.zip)
-- [Download for macOS Intel and Apple Silicon](https://github.com/DearStrike4940/archive-scout-3.0/releases/download/archive-scout-3.0-beta-1.6/ArchiveScout-macOS-Universal.zip)
+- [Download for Windows x64](../../releases/latest/download/ArchiveScout-Windows-x64.zip)
+- [Download for Linux x64](../../releases/latest/download/ArchiveScout-Linux-x64.tar.gz)
+- [Download for macOS Intel and Apple Silicon](../../releases/latest/download/ArchiveScout-macOS-Universal.zip)
 
 ### macOS installation
 
 Extract the ZIP, drag `Archive Scout.app` into `/Applications`, and launch the installed copy. Quit Archive Scout completely before replacing it with a newer release. Do not move, rename, delete, or overwrite the `.app` while it is running.
+
+## Beta 1.6 large-project reliability
+
+Beta 1.6 keeps Beta 1.5's fixed request-start rate and large CDX batches while reducing peak memory and preventing no-progress loops.
+
+- 50,000-row line-oriented responses are parsed directly into compact tuples.
+- Completed numbered pages are committed and released while sibling requests are still running.
+- Capture/media writes use bounded SQLite batches.
+- Download and rescan queues stream from SQLite instead of loading the whole project.
+- Connection-setup failure pauses after three saved multi-backend attempts.
+- Consecutive timeouts or retryable HTTP failures cannot rotate through the queue forever.
+- Valid empty CDX windows complete normally.
+- Unexpected local errors stop once with saved state instead of being retried as network failures.
+- The Activity log and UI event drain are bounded for long runs.
+
+The configured performance envelope remains 50,000 resume rows, nine blocks per numbered page, up to ten workers for small pages, a memory-aware four-worker cap for nine-block pages, and one request start every 0.75 seconds.
+
+See [Beta 1.6 stability notes](docs/BETA1_6_STABILITY.md).
 
 ## Beta 1.2 indexing-performance patch
 
@@ -393,6 +411,6 @@ Each package has a corresponding `.sha256` file.
 
 ## Release status
 
-`3.0.0-beta.1.5` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
+`3.0.0-beta.1.6` is a beta release. The core project format and major workflows are now intended to remain stable, but important projects should still be backed up before migration or large-scale testing.
 
 See [CHANGELOG.md](CHANGELOG.md), [ROADMAP.md](ROADMAP.md), and [SOURCE_VALIDATION.txt](SOURCE_VALIDATION.txt).

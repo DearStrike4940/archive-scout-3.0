@@ -2,7 +2,7 @@
 
 Product: `Archive Scout 3.0`
 
-Release: `3.0.0-beta.1.5`
+Release: `3.0.0-beta.1.6`
 
 Database schema: `5`
 
@@ -22,22 +22,39 @@ ArchiveScout-macOS-Universal.zip
 
 Each package has a corresponding `.sha256` file.
 
-## Beta 1.5 scope
+## Beta 1.6 scope
 
-Beta 1.5 changes only Wayback connection utilization and CDX transport batching. All Beta 1.4 features and workflows remain in place.
+Beta 1.6 is a whole-repository reliability and large-project optimization pass. The existing request-rate limit, project schema, visible workflows, media behavior, live Dashboard, icon, date handling, external-media operation, and signing workflow remain in place.
 
-Focused changes:
+Release-blocker fixes:
 
-- 10 bounded CDX page workers instead of 6
-- 9 CDX blocks per numbered page instead of 6
-- 50,000 rows per resume-key request instead of 25,000
-- the same fixed 0.75-second global request-start spacing (80 starts per minute)
-- 90-second HTTPX keep-alive retention instead of 45 seconds
-- automatic migration only for untouched old defaults; custom values are preserved
+- compact and bounded handling of 50,000-row CDX responses
+- immediate release of completed numbered pages
+- safe reduction/subdivision after oversized responses or parser memory pressure
+- bounded connection-setup retries followed by a clean saved pause
+- operation-wide no-progress protection
+- complete paged connection failures routed into the same connection circuit
+
+Repository-wide audit work:
+
+- streaming/bounded database, download, rescan, reporting, analysis, repair, integrity, merge, migration, and retry paths
+- temporary tables for large explicit ID selections
+- deterministic duplicate candidate de-duplication without a global pair set
+- resource cleanup on client/database/operation failures
+- bounded GUI event/log retention
+
+## Preserved Wayback speed envelope
+
+- fixed 0.75-second request-start interval
+- 50,000 rows per resume-key request
+- nine CDX blocks per numbered page
+- ten configured workers for small pages
+- four effective resident workers for nine-block pages
+- coordinated HTTP 429 backpressure
 
 ## External embedded-media workflow
 
-The dedicated operation completes the normal text index, downloads and scans the selected pages, then reads the saved documents' extracted link lists. It looks up only matching external media URLs and downloads them after discovery is complete. It uses the existing media extension filters, size limit, snapshot strategy, retries, database tables, and reports.
+The dedicated operation completes the normal text index, downloads and scans selected pages, then reads saved documents' extracted link lists. It looks up matching external media URLs and downloads them after discovery is complete using the existing media filters, size limit, snapshot strategy, retries, database tables, and reports.
 
 ## macOS bundle integrity
 
@@ -45,4 +62,4 @@ The macOS build verifies `Contents/Resources/base_library.zip`, the executable, 
 
 ## Repository upload
 
-Upload the contents of the extracted `archive-scout-3.0-beta1.5` folder to the repository root. The hidden `.github` folder must be included.
+Upload the contents of the extracted `archive-scout-3.0-beta1.6` folder to the repository root. The hidden `.github` folder must be included.

@@ -71,7 +71,7 @@ def migrate_legacy_project(root: Path) -> Path:
     keyword_set_id = get_or_create_keyword_set(modern, "Imported legacy keywords", keywords)
     scan_run_id = start_scan_run(modern, keyword_set_id, "Imported Archive Scout 1.x results", 1, "migration")
     capture_columns = legacy_columns(legacy, "captures")
-    rows = legacy.execute("SELECT * FROM captures ORDER BY timestamp,original").fetchall()
+    rows = legacy.execute("SELECT * FROM captures ORDER BY timestamp,original")
     now = utc_now()
     for row in rows:
         target_id = get_or_create_target(modern, str(row["source_target"] or "legacy-import/*"))

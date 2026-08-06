@@ -7,7 +7,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from ..cdx.client import HttpClient, RateLimitDeferred
 from ..cdx.parameters import cdx_query_signature
@@ -34,6 +34,115 @@ def capture_path(root: Path, capture_id: int, timestamp: str, original: str) -> 
     return root / "captures" / timestamp[:4] / timestamp[4:6] / f"{capture_id}_{digest}.txt"
 
 
+def prepare_download_rows(
+    database: sqlite3.Connection,
+    config: ProjectConfig,
+    patterns,
+    states: tuple[str, ...] = ("pending",),
+    capture_ids: list[int] | None = None,
+) -> tuple[int, Iterator[sqlite3.Row]]:
+    """Build a disk-backed download queue and stream rows in bounded batches.
+
+    Candidate IDs are stored in temporary SQLite tables. This avoids both the
+    project-sized Python lists used by older releases and SQLite's platform-
+    dependent parameter limit when a large retry selection is supplied.
+    """
+    database.execute("DROP TABLE IF EXISTS temp.archive_scout_download_queue")
+    database.execute(
+        "CREATE TEMP TABLE archive_scout_download_queue(id INTEGER PRIMARY KEY) WITHOUT ROWID"
+    )
+    database.execute("DROP TABLE IF EXISTS temp.archive_scout_capture_selection")
+
+    source = "captures c"
+    clauses: list[str] = []
+    params: list[object] = []
+    if capture_ids:
+        database.execute(
+            "CREATE TEMP TABLE archive_scout_capture_selection(id INTEGER PRIMARY KEY) WITHOUT ROWID"
+        )
+        database.executemany(
+            "INSERT OR IGNORE INTO archive_scout_capture_selection(id) VALUES(?)",
+            ((int(value),) for value in capture_ids),
+        )
+        source += " JOIN archive_scout_capture_selection s ON s.id=c.id"
+    else:
+        clauses.extend(["c.query_signature=?", "c.download_attempts<?"])
+        params.extend([cdx_query_signature(config), config.max_attempts])
+    if states:
+        clauses.append("c.state IN (" + ",".join("?" for _ in states) + ")")
+        params.extend(states)
+
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    cursor = database.execute(
+        "SELECT c.id,c.original_url,c.mimetype FROM " + source + where + " ORDER BY c.id",
+        params,
+    )
+    now = utc_now()
+    while True:
+        chunk = cursor.fetchmany(2000)
+        if not chunk:
+            break
+        selected_ids: list[tuple[int]] = []
+        binary_ids: list[int] = []
+        keyword_skips: list[tuple[str, int]] = []
+        for row in chunk:
+            capture_id = int(row["id"])
+            if not is_text_candidate(row["original_url"], row["mimetype"] or ""):
+                binary_ids.append(capture_id)
+                continue
+            if config.download_scope == "keyword_urls" and patterns and not keyword_url_match(row["original_url"], patterns):
+                keyword_skips.append((now, capture_id))
+                continue
+            selected_ids.append((capture_id,))
+        with database:
+            if selected_ids:
+                database.executemany(
+                    "INSERT OR IGNORE INTO archive_scout_download_queue(id) VALUES(?)",
+                    selected_ids,
+                )
+            if keyword_skips:
+                database.executemany(
+                    "UPDATE captures SET state='skipped',updated_at=? WHERE id=?",
+                    keyword_skips,
+                )
+            if binary_ids:
+                database.executemany(
+                    "UPDATE captures SET state='skipped',updated_at=? WHERE id=?",
+                    ((now, capture_id) for capture_id in binary_ids),
+                )
+                for capture_id in binary_ids:
+                    record_error(
+                        database,
+                        "download",
+                        "binary_response",
+                        "capture is not a text candidate",
+                        capture_id=capture_id,
+                        retryable=False,
+                    )
+    total = int(database.execute(
+        "SELECT COUNT(*) FROM archive_scout_download_queue"
+    ).fetchone()[0])
+
+    def iter_rows() -> Iterator[sqlite3.Row]:
+        last_id = 0
+        while True:
+            batch = database.execute(
+                """
+                SELECT c.* FROM captures c
+                JOIN archive_scout_download_queue q ON q.id=c.id
+                WHERE c.id>? ORDER BY c.id LIMIT 1000
+                """,
+                (last_id,),
+            ).fetchall()
+            if not batch:
+                return
+            for row in batch:
+                last_id = int(row["id"])
+                yield row
+
+    return total, iter_rows()
+
+
 def select_download_rows(
     database: sqlite3.Connection,
     config: ProjectConfig,
@@ -41,47 +150,17 @@ def select_download_rows(
     states: tuple[str, ...] = ("pending",),
     capture_ids: list[int] | None = None,
 ) -> list[sqlite3.Row]:
-    clauses: list[str] = []
-    params: list[object] = []
-    if not capture_ids:
-        clauses.extend(["query_signature=?", "download_attempts<?"])
-        params.extend([cdx_query_signature(config), config.max_attempts])
-    if states:
-        clauses.append("state IN (" + ",".join("?" for _ in states) + ")")
-        params.extend(states)
-    if capture_ids:
-        clauses.append("id IN (" + ",".join("?" for _ in capture_ids) + ")")
-        params.extend(capture_ids)
-    rows = database.execute(
-        "SELECT * FROM captures WHERE " + " AND ".join(clauses) + " ORDER BY timestamp,original_url",
-        params,
-    ).fetchall()
-    selected: list[sqlite3.Row] = []
-    for row in rows:
-        if not is_text_candidate(row["original_url"], row["mimetype"] or ""):
-            with database:
-                database.execute("UPDATE captures SET state='skipped',updated_at=? WHERE id=?", (utc_now(), row["id"]))
-                record_error(
-                    database,
-                    "download",
-                    "binary_response",
-                    "capture is not a text candidate",
-                    capture_id=int(row["id"]),
-                    retryable=False,
-                )
-            continue
-        if config.download_scope == "keyword_urls" and patterns and not keyword_url_match(row["original_url"], patterns):
-            with database:
-                database.execute("UPDATE captures SET state='skipped',updated_at=? WHERE id=?", (utc_now(), row["id"]))
-            continue
-        selected.append(row)
-    return selected
+    """Compatibility wrapper for extensions that expect an in-memory list."""
+    _total, rows = prepare_download_rows(
+        database, config, patterns, states=states, capture_ids=capture_ids
+    )
+    return list(rows)
 
 
 def fetch_parse_scan(row: sqlite3.Row, config: ProjectConfig, jobs: list[ScanJob], client: HttpClient) -> dict:
     original = row["original_url"]
     response = client.get(replay_url(row["timestamp"], original), config.max_file_bytes)
-    content_type = response["headers"].get("Content-Type", row["mimetype"] or "")
+    content_type = response["headers"].get("content-type") or response["headers"].get("Content-Type") or row["mimetype"] or ""
     data = response["data"]
     if not looks_textual_bytes(data, content_type):
         raise RuntimeError("downloaded response was not textual")
@@ -157,8 +236,9 @@ def download_archive(
     combined_patterns = [item for job in jobs for item in job.patterns]
     with database:
         database.execute("UPDATE captures SET state='pending' WHERE state='downloading'")
-    rows = select_download_rows(database, config, combined_patterns, states=states, capture_ids=capture_ids)
-    total = len(rows)
+    total, row_iter = prepare_download_rows(
+        database, config, combined_patterns, states=states, capture_ids=capture_ids
+    )
     if not total:
         if callback:
             callback(ProgressEvent("download", "No matching captures to download.", 0, 0))
@@ -197,96 +277,98 @@ def download_archive(
     completed = matched = failures = 0
     started = time.monotonic()
     max_inflight = max(config.workers, config.workers * 2)
-    row_iter = iter(rows)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.workers, thread_name_prefix="archive-scout") as pool:
-        futures: dict[concurrent.futures.Future, sqlite3.Row] = {}
-
-        def submit_next() -> bool:
-            try:
-                row = next(row_iter)
-            except StopIteration:
-                return False
-            if stop_event.is_set():
-                raise Stopped
-            with database:
-                database.execute(
-                    "UPDATE captures SET state='downloading',download_attempts=download_attempts+1,updated_at=? WHERE id=?",
-                    (utc_now(), row["id"]),
-                )
-            futures[pool.submit(fetch_parse_scan, row, config, jobs, client)] = row
-            return True
-
-        while len(futures) < max_inflight and submit_next():
-            pass
-        while futures:
-            if stop_event.is_set():
-                for pending in futures:
-                    pending.cancel()
-                raise Stopped
-            done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
-            for future in done:
-                row = futures.pop(future)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.workers, thread_name_prefix="archive-scout") as pool:
+            futures: dict[concurrent.futures.Future, sqlite3.Row] = {}
+    
+            def submit_next() -> bool:
                 try:
-                    result = future.result()
-                    save_success(database, result)
-                    matched += int(any(
-                        int(analysis.get("score") or 0) >= config.minimum_score
-                        and not analysis.get("excluded") and not analysis.get("required_missing")
-                        for analysis in result["analyses"].values()
-                    ))
-                except RateLimitDeferred:
-                    stop_event.set()
-                    with database:
-                        database.execute(
-                            """UPDATE captures SET state='pending',
-                               download_attempts=CASE WHEN download_attempts>0 THEN download_attempts-1 ELSE 0 END,
-                               updated_at=? WHERE state='downloading' OR id=?""",
-                            (utc_now(), row["id"]),
-                        )
+                    row = next(row_iter)
+                except StopIteration:
+                    return False
+                if stop_event.is_set():
+                    raise Stopped
+                with database:
+                    database.execute(
+                        "UPDATE captures SET state='downloading',download_attempts=download_attempts+1,updated_at=? WHERE id=?",
+                        (utc_now(), row["id"]),
+                    )
+                futures[pool.submit(fetch_parse_scan, row, config, jobs, client)] = row
+                return True
+    
+            while len(futures) < max_inflight and submit_next():
+                pass
+            while futures:
+                if stop_event.is_set():
                     for pending in futures:
                         pending.cancel()
-                    raise
-                except Stopped:
-                    with database:
-                        database.execute("UPDATE captures SET state='pending',updated_at=? WHERE id=?", (utc_now(), row["id"]))
-                    raise
-                except Exception as exc:
-                    failures += 1
-                    category, status, retryable = classify_exception(exc)
-                    if str(exc) in {"soft_404", "invalid_wayback_replay"}:
-                        category = str(exc)
-                        retryable = False
-                    with database:
-                        database.execute(
-                            "UPDATE captures SET state='error',http_status=?,updated_at=? WHERE id=?",
-                            (status, utc_now(), row["id"]),
+                    raise Stopped
+                done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    row = futures.pop(future)
+                    try:
+                        result = future.result()
+                        save_success(database, result)
+                        matched += int(any(
+                            int(analysis.get("score") or 0) >= config.minimum_score
+                            and not analysis.get("excluded") and not analysis.get("required_missing")
+                            for analysis in result["analyses"].values()
+                        ))
+                    except RateLimitDeferred:
+                        stop_event.set()
+                        with database:
+                            database.execute(
+                                """UPDATE captures SET state='pending',
+                                   download_attempts=CASE WHEN download_attempts>0 THEN download_attempts-1 ELSE 0 END,
+                                   updated_at=? WHERE state='downloading' OR id=?""",
+                                (utc_now(), row["id"]),
+                            )
+                        for pending in futures:
+                            pending.cancel()
+                        raise
+                    except Stopped:
+                        with database:
+                            database.execute("UPDATE captures SET state='pending',updated_at=? WHERE id=?", (utc_now(), row["id"]))
+                        raise
+                    except Exception as exc:
+                        failures += 1
+                        category, status, retryable = classify_exception(exc)
+                        if str(exc) in {"soft_404", "invalid_wayback_replay"}:
+                            category = str(exc)
+                            retryable = False
+                        with database:
+                            database.execute(
+                                "UPDATE captures SET state='error',http_status=?,updated_at=? WHERE id=?",
+                                (status, utc_now(), row["id"]),
+                            )
+                            record_error(
+                                database,
+                                "download",
+                                category,
+                                repr(exc),
+                                capture_id=int(row["id"]),
+                                http_status=status,
+                                retryable=retryable,
+                            )
+                    completed += 1
+                    elapsed = max(0.001, time.monotonic() - started)
+                    rate = completed / elapsed
+                    if callback:
+                        callback(
+                            ProgressEvent(
+                                "download",
+                                f"Downloaded/scanned {completed:,}/{total:,}; matches {matched:,}; errors {failures:,}; "
+                                f"{rate:.1f}/s",
+                                completed,
+                                total,
+                                {
+                                    "matched": matched,
+                                    "failures": failures,
+                                    "rate": rate,
+                                },
+                            )
                         )
-                        record_error(
-                            database,
-                            "download",
-                            category,
-                            repr(exc),
-                            capture_id=int(row["id"]),
-                            http_status=status,
-                            retryable=retryable,
-                        )
-                completed += 1
-                elapsed = max(0.001, time.monotonic() - started)
-                rate = completed / elapsed
-                if callback:
-                    callback(
-                        ProgressEvent(
-                            "download",
-                            f"Downloaded/scanned {completed:,}/{total:,}; matches {matched:,}; errors {failures:,}; "
-                            f"{rate:.1f}/s",
-                            completed,
-                            total,
-                            {
-                                "matched": matched,
-                                "failures": failures,
-                                "rate": rate,
-                            },
-                        )
-                    )
-                while len(futures) < max_inflight and submit_next():
-                    pass
+                    while len(futures) < max_inflight and submit_next():
+                        pass
+    finally:
+        client.close()

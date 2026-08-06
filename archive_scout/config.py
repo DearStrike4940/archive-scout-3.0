@@ -137,6 +137,8 @@ class NetworkConfig:
     retry_base_seconds: float = 5.0
     retry_max_seconds: float = 300.0
     failure_pause_threshold: int = 8
+    connection_failure_pause_threshold: int = 3
+    connection_retry_seconds: float = 3.0
     diagnostics: bool = True
 
     def normalized(self) -> "NetworkConfig":
@@ -160,6 +162,8 @@ class NetworkConfig:
             retry_base_seconds=max(1.0, float(self.retry_base_seconds)),
             retry_max_seconds=max(float(self.retry_base_seconds), float(self.retry_max_seconds)),
             failure_pause_threshold=min(100, max(2, int(self.failure_pause_threshold))),
+            connection_failure_pause_threshold=min(10, max(2, int(self.connection_failure_pause_threshold))),
+            connection_retry_seconds=min(30.0, max(1.0, float(self.connection_retry_seconds))),
             diagnostics=bool(self.diagnostics),
         )
 
@@ -462,6 +466,8 @@ def load_project_config(path: Path) -> ProjectConfig:
             retry_base_seconds=float(network_payload.get("retry_base_seconds", 5.0)),
             retry_max_seconds=float(network_payload.get("retry_max_seconds", 300.0)),
             failure_pause_threshold=int(network_payload.get("failure_pause_threshold", 8)),
+            connection_failure_pause_threshold=int(network_payload.get("connection_failure_pause_threshold", 3)),
+            connection_retry_seconds=float(network_payload.get("connection_retry_seconds", 3.0)),
             diagnostics=bool(network_payload.get("diagnostics", True)),
         ),
         target_settings=dict(payload.get("target_settings") or {}),

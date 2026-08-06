@@ -130,6 +130,23 @@ def atomic_write_text(path: Path, text: str) -> None:
             os.unlink(temp_name)
 
 
+def atomic_write_lines(path: Path, lines: Iterable[str]) -> None:
+    """Atomically stream text lines without building one project-sized string."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace", newline="\n") as handle:
+            for line in lines:
+                text = str(line)
+                handle.write(text)
+                if text and not text.endswith("\n"):
+                    handle.write("\n")
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
 def json_value(value: str | None, default):
     if not value:
         return default

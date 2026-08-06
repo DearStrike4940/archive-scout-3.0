@@ -15,13 +15,13 @@ def check_project_integrity(
 ) -> Path:
     issues: list[str] = []
     referenced: set[Path] = set()
+    total = int(database.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
     documents = database.execute(
         """
         SELECT d.id,d.path,d.size_bytes,c.id AS capture_id,c.original_url,c.state
         FROM documents d JOIN captures c ON c.id=d.capture_id ORDER BY d.id
         """
-    ).fetchall()
-    total = len(documents)
+    )
     for index, row in enumerate(documents, 1):
         path = Path(row["path"])
         referenced.add(path.resolve())
@@ -44,7 +44,7 @@ def check_project_integrity(
            OR (document_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM documents d WHERE d.id=captures.document_id))
         ORDER BY id
         """
-    ).fetchall()
+    )
     for row in bad_captures:
         issues.append(
             f"BROKEN_DATABASE_LINK\tcapture={row['id']}\tstate={row['state']}\tdocument={row['document_id']}\t{row['original_url']}"

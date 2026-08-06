@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from ..utils import atomic_write_text, utc_now
+from ..utils import atomic_write_lines, utc_now
 
 
 def _run_label(database: sqlite3.Connection, scan_run_id: int) -> str:
@@ -20,23 +20,6 @@ def _run_label(database: sqlite3.Connection, scan_run_id: int) -> str:
     return f"{scan_run_id} — {row['name']} — {row['keyword_set_name']}"
 
 
-def _rows(database: sqlite3.Connection, scan_run_id: int) -> dict[int, sqlite3.Row]:
-    rows = database.execute(
-        """
-        SELECT m.document_id,m.score,m.hits_json,m.excluded,m.required_missing,
-               d.title,c.original_url,c.timestamp,
-               COALESCE(r.status,'unreviewed') AS review_status
-        FROM document_matches m
-        JOIN documents d ON d.id=m.document_id
-        JOIN captures c ON c.id=d.capture_id
-        LEFT JOIN reviews r ON r.match_id=m.id
-        WHERE m.scan_run_id=?
-        """,
-        (scan_run_id,),
-    ).fetchall()
-    return {int(row["document_id"]): row for row in rows}
-
-
 def generate_scan_comparison(
     database: sqlite3.Connection,
     first_scan_id: int,
@@ -45,50 +28,104 @@ def generate_scan_comparison(
 ) -> Path:
     if first_scan_id == second_scan_id:
         raise ValueError("select two different scan runs")
-    first = _rows(database, first_scan_id)
-    second = _rows(database, second_scan_id)
-    shared = sorted(set(first) & set(second))
-    only_first = sorted(set(first) - set(second))
-    only_second = sorted(set(second) - set(first))
-    changed = sorted(
-        shared,
-        key=lambda document_id: abs(int(second[document_id]["score"]) - int(first[document_id]["score"])),
-        reverse=True,
-    )
-    lines = [
-        "Archive Scout scan comparison",
-        f"Generated: {utc_now()}",
-        f"First: {_run_label(database, first_scan_id)}",
-        f"Second: {_run_label(database, second_scan_id)}",
-        f"Documents in both: {len(shared):,}",
-        f"Only in first: {len(only_first):,}",
-        f"Only in second: {len(only_second):,}",
-        "",
-        "SCORE CHANGES",
-    ]
-    for document_id in changed:
-        left = first[document_id]
-        right = second[document_id]
-        delta = int(right["score"]) - int(left["score"])
-        lines.append(
-            "\t".join(
+
+    shared = int(database.execute(
+        """
+        SELECT COUNT(*) FROM document_matches first
+        JOIN document_matches second ON second.document_id=first.document_id
+        WHERE first.scan_run_id=? AND second.scan_run_id=?
+        """,
+        (first_scan_id, second_scan_id),
+    ).fetchone()[0])
+    only_first = int(database.execute(
+        """
+        SELECT COUNT(*) FROM document_matches first
+        WHERE first.scan_run_id=? AND NOT EXISTS(
+            SELECT 1 FROM document_matches second
+            WHERE second.scan_run_id=? AND second.document_id=first.document_id
+        )
+        """,
+        (first_scan_id, second_scan_id),
+    ).fetchone()[0])
+    only_second = int(database.execute(
+        """
+        SELECT COUNT(*) FROM document_matches second
+        WHERE second.scan_run_id=? AND NOT EXISTS(
+            SELECT 1 FROM document_matches first
+            WHERE first.scan_run_id=? AND first.document_id=second.document_id
+        )
+        """,
+        (second_scan_id, first_scan_id),
+    ).fetchone()[0])
+
+    def lines():
+        yield "Archive Scout scan comparison"
+        yield f"Generated: {utc_now()}"
+        yield f"First: {_run_label(database, first_scan_id)}"
+        yield f"Second: {_run_label(database, second_scan_id)}"
+        yield f"Documents in both: {shared:,}"
+        yield f"Only in first: {only_first:,}"
+        yield f"Only in second: {only_second:,}"
+        yield ""
+        yield "SCORE CHANGES"
+        for row in database.execute(
+            """
+            SELECT first.score AS first_score,second.score AS second_score,
+                   c.timestamp,c.original_url,d.title
+            FROM document_matches first
+            JOIN document_matches second ON second.document_id=first.document_id
+            JOIN documents d ON d.id=first.document_id
+            JOIN captures c ON c.id=d.capture_id
+            WHERE first.scan_run_id=? AND second.scan_run_id=?
+            ORDER BY ABS(second.score-first.score) DESC,first.document_id
+            """,
+            (first_scan_id, second_scan_id),
+        ):
+            delta = int(row["second_score"]) - int(row["first_score"])
+            yield "\t".join(
                 [
                     f"delta={delta:+d}",
-                    f"first={left['score']}",
-                    f"second={right['score']}",
-                    left["timestamp"],
-                    left["original_url"],
-                    left["title"] or "(untitled)",
+                    f"first={row['first_score']}",
+                    f"second={row['second_score']}",
+                    row["timestamp"],
+                    row["original_url"],
+                    row["title"] or "(untitled)",
                 ]
             )
-        )
-    lines.extend(["", "ONLY IN FIRST"])
-    for document_id in only_first:
-        row = first[document_id]
-        lines.append(f"{row['score']}\t{row['timestamp']}\t{row['original_url']}\t{row['title'] or '(untitled)'}")
-    lines.extend(["", "ONLY IN SECOND"])
-    for document_id in only_second:
-        row = second[document_id]
-        lines.append(f"{row['score']}\t{row['timestamp']}\t{row['original_url']}\t{row['title'] or '(untitled)'}")
-    atomic_write_text(destination, "\n".join(lines) + "\n")
+        yield ""
+        yield "ONLY IN FIRST"
+        for row in database.execute(
+            """
+            SELECT first.score,c.timestamp,c.original_url,d.title
+            FROM document_matches first
+            JOIN documents d ON d.id=first.document_id
+            JOIN captures c ON c.id=d.capture_id
+            WHERE first.scan_run_id=? AND NOT EXISTS(
+                SELECT 1 FROM document_matches second
+                WHERE second.scan_run_id=? AND second.document_id=first.document_id
+            )
+            ORDER BY first.document_id
+            """,
+            (first_scan_id, second_scan_id),
+        ):
+            yield f"{row['score']}\t{row['timestamp']}\t{row['original_url']}\t{row['title'] or '(untitled)'}"
+        yield ""
+        yield "ONLY IN SECOND"
+        for row in database.execute(
+            """
+            SELECT second.score,c.timestamp,c.original_url,d.title
+            FROM document_matches second
+            JOIN documents d ON d.id=second.document_id
+            JOIN captures c ON c.id=d.capture_id
+            WHERE second.scan_run_id=? AND NOT EXISTS(
+                SELECT 1 FROM document_matches first
+                WHERE first.scan_run_id=? AND first.document_id=second.document_id
+            )
+            ORDER BY second.document_id
+            """,
+            (second_scan_id, first_scan_id),
+        ):
+            yield f"{row['score']}\t{row['timestamp']}\t{row['original_url']}\t{row['title'] or '(untitled)'}"
+
+    atomic_write_lines(destination, lines())
     return destination

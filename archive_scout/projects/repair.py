@@ -9,22 +9,31 @@ from ..projects.backups import create_project_backup
 from ..utils import atomic_write_text, utc_now
 
 
-def rebuild_full_text_index(database: sqlite3.Connection) -> int:
+def rebuild_full_text_index(database: sqlite3.Connection, batch_size: int = 500) -> int:
     enabled = database.execute("SELECT value FROM project_meta WHERE key='fts5'").fetchone()
     if not enabled or enabled[0] != "1":
         return 0
     database.execute("DELETE FROM documents_fts")
-    rows = database.execute(
+    cursor = database.execute(
         """
         SELECT d.id,d.title,d.body_text,c.original_url
         FROM documents d JOIN captures c ON c.id=d.capture_id ORDER BY d.id
         """
-    ).fetchall()
-    database.executemany(
-        "INSERT INTO documents_fts(rowid,title,body_text,original_url) VALUES(?,?,?,?)",
-        [(row["id"], row["title"] or "", row["body_text"] or "", row["original_url"] or "") for row in rows],
     )
-    return len(rows)
+    rebuilt = 0
+    while True:
+        rows = cursor.fetchmany(max(1, int(batch_size)))
+        if not rows:
+            break
+        database.executemany(
+            "INSERT INTO documents_fts(rowid,title,body_text,original_url) VALUES(?,?,?,?)",
+            (
+                (row["id"], row["title"] or "", row["body_text"] or "", row["original_url"] or "")
+                for row in rows
+            ),
+        )
+        rebuilt += len(rows)
+    return rebuilt
 
 
 def repair_project(
@@ -54,15 +63,28 @@ def repair_project(
             (utc_now(), utc_now()),
         ).rowcount
         missing = 0
-        for row in database.execute(
-            "SELECT d.id,d.path,d.capture_id FROM documents d ORDER BY d.id"
-        ).fetchall():
-            path = Path(row["path"])
-            if not path.is_file() or path.stat().st_size == 0:
-                database.execute("UPDATE captures SET state='pending',document_id=NULL,updated_at=? WHERE id=?", (utc_now(), row["capture_id"]))
-                database.execute("DELETE FROM documents_fts WHERE rowid=?", (row["id"],))
-                database.execute("DELETE FROM documents WHERE id=?", (row["id"],))
-                missing += 1
+        last_id = 0
+        while True:
+            rows = database.execute(
+                "SELECT d.id,d.path,d.capture_id FROM documents d WHERE d.id>? ORDER BY d.id LIMIT 500",
+                (last_id,),
+            ).fetchall()
+            if not rows:
+                break
+            last_id = int(rows[-1]["id"])
+            invalid = []
+            for row in rows:
+                path = Path(row["path"])
+                if not path.is_file() or path.stat().st_size == 0:
+                    invalid.append((int(row["id"]), int(row["capture_id"])))
+            for document_id, capture_id in invalid:
+                database.execute(
+                    "UPDATE captures SET state='pending',document_id=NULL,updated_at=? WHERE id=?",
+                    (utc_now(), capture_id),
+                )
+                database.execute("DELETE FROM documents_fts WHERE rowid=?", (document_id,))
+                database.execute("DELETE FROM documents WHERE id=?", (document_id,))
+            missing += len(invalid)
         rebuilt = rebuild_full_text_index(database)
         database.execute("INSERT INTO repair_actions(action,details,created_at) VALUES(?,?,?)", ("repair", f"capture_reset={capture_reset}; media_reset={media_reset}; missing={missing}; fts={rebuilt}", utc_now()))
 

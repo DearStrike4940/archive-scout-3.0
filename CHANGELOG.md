@@ -1,5 +1,30 @@
 # Changelog
 
+## 3.0.0-beta.1.6
+
+- Reworked the 50,000-row CDX path to parse line-oriented responses directly into compact tuples instead of simultaneously retaining raw bytes, a decoded full string, nested JSON-style lists, and per-row dictionaries.
+- Writes completed numbered pages to SQLite as each page finishes and immediately releases the page rows, rather than retaining an entire worker batch until the slowest request completes.
+- Added a memory-aware concurrency ceiling for large nine-block CDX pages while preserving the fixed 0.75-second request-start spacing and up to ten workers for small pages.
+- Changed capture and media upserts to bounded 2,000-row SQLite batches without building a duplicate full values list.
+- Removed full in-memory candidate lists from text downloading, media downloading, and local rescanning; these operations now use temporary SQLite queues or keyset pagination.
+- Replaced the in-memory media snapshot grouping pass with a SQLite window-function selection.
+- Added composite download indexes for capture and media queues.
+- Added a dedicated connection-setup circuit: DNS, proxy, TLS, and connect failures retry the same saved request briefly and pause cleanly after three complete multi-backend attempts.
+- Added an operation-wide no-progress watchdog so repeated timeouts or retryable HTTP failures cannot rotate through split windows indefinitely.
+- Reduced the CDX-only connect-timeout ceiling from 45 to 15 seconds; successful requests are unaffected, while unreachable networks fail over and pause faster.
+- Stops treating unexpected parser, SQLite, filesystem, or programming errors as transient network failures; they are saved once and surfaced immediately.
+- Treats a successful empty line-oriented CDX response as a valid zero-result window instead of subdividing it repeatedly.
+- Avoids repeating the same DNS/proxy/TLS failure across alternate paths on the same Wayback host.
+- Preserves compatibility with integrations and tests that implement the older `get_cdx_any` client surface.
+- Bounded the Activity log and event-drain loop so very large runs do not make the GUI consume memory indefinitely.
+- Added focused 50,000-row parser, 50,000-row database, streaming-queue, connection-pause, and unexpected-error regression tests.
+- Converts oversized CDX bodies and parser memory pressure into splittable saved work instead of fatal crashes.
+- Streams scan comparison, full-text repair, integrity checks, external-asset lookup, analysis reporting, project merge, and migration paths where full project lists were unnecessary.
+- Replaced the global near-duplicate candidate-pair set with deterministic lowest-shared-band processing.
+- Added temporary-table handling for large text/media retry selections and chunked error updates below SQLite parameter limits.
+- Removed an unused provenance timeline materialization from the analysis workflow.
+- Added a complete synthetic 50,000-capture indexing regression and large 1,200-ID retry-selection regressions.
+
 ## 3.0.0-beta.1.5
 
 - Increased default CDX page workers from 6 to 10.

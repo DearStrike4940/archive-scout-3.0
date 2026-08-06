@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -33,6 +34,10 @@ class TransportExhaustedError(RuntimeError):
         self.url = url
         self.failures = failures
         self.timed_out = any(is_transport_timeout(exc) for _, exc in failures)
+        self.read_timed_out = any(is_transport_read_timeout(exc) for _, exc in failures)
+        self.connection_failed = bool(failures) and all(
+            is_transport_connection_failure(exc) for _, exc in failures
+        )
         summary = "; ".join(f"{name}: {type(exc).__name__}: {exc}" for name, exc in failures)
         super().__init__(f"all network backends failed for {url}: {summary}")
 
@@ -42,7 +47,7 @@ class TransportResponse:
     status: int
     headers: dict[str, str]
     final_url: str
-    data: bytes
+    data: bytes | bytearray
     backend: str
     elapsed: float
 
@@ -71,6 +76,45 @@ def is_transport_timeout(exc: BaseException) -> bool:
 
 
 
+def is_transport_connection_failure(exc: BaseException) -> bool:
+    """Classify DNS, proxy, TLS, and socket setup failures across backends."""
+    current: BaseException | None = exc
+    visited: set[int] = set()
+    connection_types = (
+        ConnectionError,
+        ConnectionRefusedError,
+        socket.gaierror,
+        ssl.SSLError,
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ProxyError,
+        urllib3.exceptions.NewConnectionError,
+        urllib3.exceptions.NameResolutionError,
+        urllib3.exceptions.ConnectTimeoutError,
+        urllib3.exceptions.ProxyError,
+    )
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, connection_types):
+            return True
+        if isinstance(current, OSError):
+            text = str(current).casefold()
+            if any(token in text for token in (
+                "could not resolve", "name resolution", "failed to resolve",
+                "connection refused", "connect call failed", "failed to connect",
+                "connection timed out", "resolving timed out", "proxy",
+                "certificate", "ssl", "tls", "network is unreachable",
+                "no route to host",
+            )):
+                return True
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, BaseException) and reason is not current:
+            current = reason
+            continue
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def is_transport_read_timeout(exc: BaseException) -> bool:
     current: BaseException | None = exc
     visited: set[int] = set()
@@ -93,7 +137,7 @@ def _ssl_context() -> ssl.SSLContext:
     return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT) if truststore else ssl.create_default_context()
 
 
-def _read_limited(chunks: Iterable[bytes], max_bytes: int, stop_event: threading.Event) -> bytes:
+def _read_limited(chunks: Iterable[bytes], max_bytes: int, stop_event: threading.Event) -> bytearray:
     data = bytearray()
     for chunk in chunks:
         if stop_event.is_set():
@@ -103,7 +147,19 @@ def _read_limited(chunks: Iterable[bytes], max_bytes: int, stop_event: threading
         data.extend(chunk)
         if len(data) > max_bytes:
             raise RuntimeError(f"response exceeds {max_bytes:,} bytes")
-    return bytes(data)
+    # Returning the bytearray avoids a full-size bytes copy at the exact moment
+    # the response buffer is largest. Consumers only require the bytes-like API.
+    return data
+
+
+def _copy_headers(items: Iterable[tuple[object, object]]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for raw_key, raw_value in items:
+        key = str(raw_key)
+        value = str(raw_value)
+        headers[key] = value
+        headers[key.casefold()] = value
+    return headers
 
 
 class HttpxBackend:
@@ -150,7 +206,7 @@ class HttpxBackend:
             data = _read_limited(response.iter_bytes(1024 * 1024), max_bytes, stop_event)
             return TransportResponse(
                 status=int(response.status_code),
-                headers={str(k): str(v) for k, v in response.headers.items()},
+                headers=_copy_headers(response.headers.items()),
                 final_url=str(response.url),
                 data=data,
                 backend=self.name,
@@ -227,7 +283,7 @@ class Urllib3Backend:
             data = _read_limited(response.stream(amt=1024 * 1024, decode_content=True), max_bytes, stop_event)
             result = TransportResponse(
                 status=int(response.status),
-                headers={str(k): str(v) for k, v in response.headers.items()},
+                headers=_copy_headers(response.headers.items()),
                 final_url=current_url,
                 data=data,
                 backend=self.name,
@@ -264,7 +320,10 @@ class CurlBackend:
             if ":" not in line:
                 continue
             key, value = line.split(":", 1)
-            headers[key.strip()] = value.strip()
+            clean_key = key.strip()
+            clean_value = value.strip()
+            headers[clean_key] = clean_value
+            headers[clean_key.casefold()] = clean_value
         return headers
 
     def request(
@@ -284,7 +343,6 @@ class CurlBackend:
                 "--location",
                 "--compressed",
                 "--http1.1",
-                "--ipv4",
                 "--silent",
                 "--show-error",
                 "--connect-timeout",
@@ -437,7 +495,7 @@ class ResilientTransport:
                 if str(exc).startswith("response exceeds") or "too many redirects" in str(exc):
                     raise
                 failures.append((name, exc))
-            except BaseException as exc:
+            except Exception as exc:
                 failures.append((name, exc))
             with self.lock:
                 self.cooldown_until[name] = time.monotonic() + 30.0

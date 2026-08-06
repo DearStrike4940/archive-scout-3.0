@@ -6,9 +6,10 @@ import re
 import threading
 import time
 import urllib.parse
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Callable, Iterable
+from typing import Callable, Iterable, TypeAlias
 
 import httpx
 import urllib3
@@ -16,7 +17,13 @@ import urllib3
 from ..constants import RETRYABLE_STATUS
 from ..downloads.rate_limit import FixedRateLimiter, SharedHostGate
 from ..events import Stopped
-from ..network.transports import ResilientTransport, TransportExhaustedError, is_transport_timeout
+from ..network.transports import (
+    ResilientTransport,
+    TransportExhaustedError,
+    is_transport_connection_failure,
+    is_transport_read_timeout,
+    is_transport_timeout,
+)
 from ..runtime import ensure_frozen_bundle_available, frozen_bundle_error_from_exception, is_missing_frozen_bundle_error
 from ..utils import clean_space
 
@@ -28,12 +35,16 @@ class TransientRequestError(RuntimeError):
         *,
         status: int | None = None,
         timed_out: bool = False,
+        read_timed_out: bool = False,
+        connection_failed: bool = False,
         splittable: bool = False,
         endpoint: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
-        self.timed_out = timed_out
+        self.read_timed_out = bool(read_timed_out)
+        self.connection_failed = bool(connection_failed)
+        self.timed_out = bool(timed_out or read_timed_out)
         self.splittable = splittable
         self.endpoint = endpoint
 
@@ -48,6 +59,17 @@ class RateLimitDeferred(TransientRequestError):
     def __init__(self, message: str, *, status: int = 429, waited: float = 0.0) -> None:
         super().__init__(message, status=status, splittable=False)
         self.waited = float(waited)
+
+
+CDXRow: TypeAlias = tuple[str, str, str, str, str, str]
+
+
+@dataclass(slots=True)
+class CDXRows:
+    """Compact CDX rows in timestamp/original/mimetype/status/digest/length order."""
+
+    rows: list[CDXRow]
+    resume_key: str | None = None
 
 
 def is_timeout_error(exc: BaseException) -> bool:
@@ -154,8 +176,9 @@ class HttpClient:
                     response = self.transport.request(url, headers, max_bytes, self.stop_event)
                 status = int(response.status)
 
-                if status == 429 or (status == 503 and response.headers.get("Retry-After")):
-                    retry_after = parse_retry_after(response.headers.get("Retry-After"))
+                retry_after_header = response.headers.get("retry-after") or response.headers.get("Retry-After")
+                if status == 429 or (status == 503 and retry_after_header):
+                    retry_after = parse_retry_after(retry_after_header)
                     rate_attempt += 1
                     wait_seconds = self.host_gate.pause_for_rate_limit(retry_after, f"HTTP {status}")
                     total_rate_wait += wait_seconds
@@ -188,7 +211,7 @@ class HttpClient:
                             status=status,
                             splittable=status in {408, 500, 502, 503, 504},
                         )
-                    self.retry_wait(generic_attempt - 1, f"HTTP {status}", parse_retry_after(response.headers.get("Retry-After")))
+                    self.retry_wait(generic_attempt - 1, f"HTTP {status}", parse_retry_after(retry_after_header))
                     continue
 
                 return {
@@ -212,16 +235,28 @@ class HttpClient:
                 # handled before deterministic local RuntimeError failures.
                 if isinstance(exc, TransportExhaustedError):
                     timed_out = is_timeout_error(exc)
+                    read_timed_out = bool(getattr(exc, "read_timed_out", False))
                     generic_attempt += 1
                     if generic_attempt >= self.retries:
                         raise TransientRequestError(
                             f"network failure for {url}: {exc}",
                             timed_out=timed_out,
+                            read_timed_out=read_timed_out,
+                            connection_failed=bool(getattr(exc, "connection_failed", False)),
                             splittable=True,
                         ) from exc
                     self.retry_wait(generic_attempt - 1, "read timeout" if timed_out else str(exc))
                     continue
-                # Size limits, malformed URLs, and other local validation errors
+                if str(exc).startswith("response exceeds"):
+                    # A valid CDX query can exceed the current response budget when
+                    # historical URLs are unusually long. Treat this as recoverable
+                    # pressure so the indexer can halve the page and/or split the
+                    # saved date window instead of terminating near a 50k boundary.
+                    raise TransientRequestError(
+                        f"CDX response was larger than the safe in-memory budget for {url}: {exc}",
+                        splittable=True,
+                    ) from exc
+                # Malformed URLs and other deterministic local validation errors
                 # remain permanent and should not enter the network retry queue.
                 raise
             except (httpx.HTTPError, urllib3.exceptions.HTTPError, TimeoutError, OSError) as exc:
@@ -229,14 +264,22 @@ class HttpClient:
                 if is_missing_frozen_bundle_error(exc):
                     raise frozen_bundle_error_from_exception(exc) from exc
                 timed_out = is_timeout_error(exc)
+                read_timed_out = is_transport_read_timeout(exc)
                 generic_attempt += 1
                 if generic_attempt >= self.retries:
                     raise TransientRequestError(
                         f"network failure for {url}: {exc}",
                         timed_out=timed_out,
+                        read_timed_out=read_timed_out,
+                        connection_failed=is_transport_connection_failure(exc),
                         splittable=True,
                     ) from exc
                 self.retry_wait(generic_attempt - 1, "read timeout" if timed_out else str(exc))
+            except Exception:
+                # Do not leave a recovery probe marked in-flight when a local
+                # parser/validation defect escapes the network categories above.
+                self.host_gate.finish_request(permit, recovered=False)
+                raise
 
     def get_json(self, url: str, params: list[tuple[str, str]], max_bytes: int = 64 * 1024 * 1024) -> object:
         return self.get_json_any((url,), params, max_bytes=max_bytes)
@@ -292,6 +335,12 @@ class HttpClient:
                         payload = parse_json_response(response["data"], endpoint)
                     self._remember_endpoint_success(endpoint)
                     return payload
+                except MemoryError as exc:
+                    raise TransientRequestError(
+                        f"CDX parsing exceeded available memory at {endpoint}; retrying with smaller saved work",
+                        splittable=True,
+                        endpoint=endpoint,
+                    ) from exc
                 except MalformedCDXResponse as exc:
                     first_error = first_error or exc
                     if self.retry_callback:
@@ -300,11 +349,20 @@ class HttpClient:
                     continue
                 except TransientRequestError as exc:
                     first_error = first_error or exc
+                    # Every configured CDX endpoint uses the same Wayback host.
+                    # Once every independent transport fails during connection
+                    # setup, trying two more paths on that host only multiplies a
+                    # DNS/proxy/TLS failure. Return control to the saved operation
+                    # queue immediately so it can retry briefly and pause cleanly.
+                    if exc.connection_failed or "safe in-memory budget" in str(exc):
+                        self._remember_endpoint_failure(endpoint)
+                        exc.endpoint = endpoint
+                        raise
                     # A read timeout means Wayback accepted the request but did
                     # not finish the body. Repeating the same expensive query
                     # against every endpoint multiplies the stall; let the page
                     # queue requeue or subdivide it immediately instead.
-                    if exc.timed_out:
+                    if exc.read_timed_out or exc.timed_out:
                         self._remember_endpoint_failure(endpoint)
                         exc.endpoint = endpoint
                         raise
@@ -337,7 +395,109 @@ class HttpClient:
         raise TransientRequestError(
             f"all CDX endpoints failed: {summary}",
             timed_out=timed_out,
+            read_timed_out=any(exc.read_timed_out for _, exc in failures),
+            connection_failed=bool(failures) and all(exc.connection_failed for _, exc in failures),
             splittable=splittable or timed_out,
+        ) from (failures[-1][1] if failures else None)
+
+    def get_cdx_rows_any(
+        self,
+        urls: Iterable[str],
+        params: list[tuple[str, str]],
+        max_bytes: int = 64 * 1024 * 1024,
+        *,
+        prefer_text: bool = True,
+    ) -> CDXRows:
+        """Fetch CDX rows without constructing a second list of per-row dicts.
+
+        Large 50,000-row responses previously existed simultaneously as raw
+        bytes, one decoded string, a list-of-lists, and a list-of-dicts. That
+        multiplication was the main source of the platform-dependent crashes
+        near the first large page. This path parses directly into compact tuples.
+        """
+        # Keep compatibility with callers and tests that replace the public
+        # get_cdx_any method. Production uses the compact direct parser below;
+        # an overridden legacy method is converted once into compact rows.
+        legacy_getter = getattr(type(self), "get_cdx_any")
+        if (
+            getattr(legacy_getter, "__module__", "") != __name__
+            or getattr(legacy_getter, "__name__", "") != "get_cdx_any"
+        ):
+            payload = self.get_cdx_any(
+                urls, params, max_bytes=max_bytes, prefer_text=prefer_text
+            )
+            return parse_cdx_rows_payload(payload)
+
+        endpoints = self._ordered_endpoints(urls)
+        if not endpoints:
+            raise ValueError("at least one endpoint is required")
+        failures: list[tuple[str, TransientRequestError]] = []
+        text_params = cdx_text_fallback_params(params)
+
+        for endpoint in endpoints:
+            attempts = ("text", "json") if prefer_text else ("json", "text")
+            first_error: BaseException | None = None
+            for format_name in attempts:
+                request_params = text_params if format_name == "text" else params
+                full_url = endpoint + "?" + urllib.parse.urlencode(request_params, doseq=True)
+                try:
+                    accept = "text/plain,*/*" if format_name == "text" else "application/json,text/plain,*/*"
+                    response = self.get(full_url, max_bytes, accept)
+                    if format_name == "text":
+                        result = parse_cdx_text_rows(response["data"], endpoint, request_params)
+                    else:
+                        result = parse_cdx_rows_payload(parse_json_response(response["data"], endpoint))
+                    self._remember_endpoint_success(endpoint)
+                    return result
+                except MemoryError as exc:
+                    raise TransientRequestError(
+                        f"CDX parsing exceeded available memory at {endpoint}; retrying with smaller saved work",
+                        splittable=True,
+                        endpoint=endpoint,
+                    ) from exc
+                except MalformedCDXResponse as exc:
+                    first_error = first_error or exc
+                    if self.retry_callback:
+                        other = "JSON" if format_name == "text" else "line-oriented text"
+                        self.retry_callback(1, 1, f"CDX {format_name} response was incomplete; retrying as {other}", 0.0)
+                    continue
+                except TransientRequestError as exc:
+                    first_error = first_error or exc
+                    if (
+                        exc.connection_failed
+                        or exc.read_timed_out
+                        or exc.timed_out
+                        or "safe in-memory budget" in str(exc)
+                    ):
+                        self._remember_endpoint_failure(endpoint)
+                        exc.endpoint = endpoint
+                        raise
+                    break
+                except RuntimeError as exc:
+                    if str(exc).startswith("HTTP ") or str(exc).startswith("response exceeds"):
+                        raise
+                    first_error = first_error or exc
+                    continue
+
+            self._remember_endpoint_failure(endpoint)
+            failure = first_error if isinstance(first_error, TransientRequestError) else MalformedCDXResponse(
+                f"CDX response was unusable at {endpoint}: {first_error}",
+                splittable=True,
+                endpoint=endpoint,
+            )
+            failure.endpoint = endpoint
+            failures.append((endpoint, failure))
+            if self.retry_callback and len(endpoints) > 1:
+                self.retry_callback(1, len(endpoints), f"Endpoint unavailable: {endpoint}; trying alternate CDX service", 0.0)
+
+        timed_out = any(exc.timed_out for _, exc in failures)
+        summary = "; ".join(f"{endpoint}: {exc}" for endpoint, exc in failures)
+        raise TransientRequestError(
+            f"all CDX endpoints failed: {summary}",
+            timed_out=timed_out,
+            read_timed_out=any(exc.read_timed_out for _, exc in failures),
+            connection_failed=bool(failures) and all(exc.connection_failed for _, exc in failures),
+            splittable=timed_out or any(exc.splittable for _, exc in failures),
         ) from (failures[-1][1] if failures else None)
 
     def get_json_any(
@@ -358,6 +518,33 @@ class HttpClient:
             raise Stopped
 
 
+
+def request_cdx_rows(
+    client: object,
+    urls: Iterable[str],
+    params: list[tuple[str, str]],
+    max_bytes: int = 64 * 1024 * 1024,
+    *,
+    prefer_text: bool = True,
+) -> CDXRows:
+    """Use the compact row API while retaining compatibility with clients.
+
+    Third-party integrations and the long-standing test/mocking surface may
+    implement only ``get_cdx_any``. Converting that legacy payload here keeps
+    those clients working while the built-in HttpClient takes the low-memory
+    direct parsing path.
+    """
+    compact_getter = getattr(client, "get_cdx_rows_any", None)
+    if callable(compact_getter):
+        return compact_getter(
+            urls, params, max_bytes=max_bytes, prefer_text=prefer_text
+        )
+    legacy_getter = getattr(client, "get_cdx_any")
+    payload = legacy_getter(
+        urls, params, max_bytes=max_bytes, prefer_text=prefer_text
+    )
+    return parse_cdx_rows_payload(payload)
+
 def parse_json_response(data: bytes, endpoint: str = "") -> object:
     raw = data.decode("utf-8", "replace").lstrip("\ufeff").strip()
     if not raw:
@@ -373,6 +560,166 @@ def parse_json_response(data: bytes, endpoint: str = "") -> object:
             splittable=True,
             endpoint=endpoint,
         ) from exc
+
+
+def _decode_field(value: bytes | bytearray | memoryview) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "replace")
+    return value.tobytes().decode("utf-8", "replace")
+
+
+def _iter_binary_lines(data: bytes | bytearray):
+    """Yield lines using the C-level delimiter search, without a full copy."""
+    start = 0
+    length = len(data)
+    while start < length:
+        end = data.find(b"\n", start)
+        if end < 0:
+            yield data[start:]
+            return
+        yield data[start:end]
+        start = end + 1
+
+
+def parse_cdx_rows_payload(payload: object) -> CDXRows:
+    """Convert JSON-style CDX data directly to compact tuples."""
+    if payload in (None, []):
+        return CDXRows([])
+    if isinstance(payload, dict):
+        message = str(payload.get("message") or payload.get("error") or payload)
+        lowered = message.casefold()
+        if "no capture" in lowered or "no result" in lowered or "not found" in lowered:
+            return CDXRows([])
+        raise RuntimeError(message)
+    if not isinstance(payload, list) or not payload:
+        return CDXRows([])
+    header = payload[0]
+    if not isinstance(header, list):
+        raise RuntimeError("unexpected CDX response header")
+    positions = {str(name): index for index, name in enumerate(header)}
+    required = ("timestamp", "original")
+    if any(name not in positions for name in required):
+        raise RuntimeError("CDX response did not include timestamp and original")
+    body = payload[1:]
+    resume_key: str | None = None
+    if len(body) >= 2 and body[-2] == [] and isinstance(body[-1], list) and len(body[-1]) == 1:
+        resume_key = str(body[-1][0])
+        body = body[:-2]
+
+    def value(item: list, name: str) -> str:
+        index = positions.get(name)
+        if index is None or index >= len(item):
+            return ""
+        return str(item[index] if item[index] is not None else "")
+
+    rows: list[CDXRow] = []
+    for item in body:
+        if not isinstance(item, list) or len(item) != len(header):
+            continue
+        timestamp = value(item, "timestamp")
+        original = value(item, "original")
+        if timestamp and original:
+            rows.append(
+                (
+                    timestamp,
+                    original,
+                    value(item, "mimetype"),
+                    value(item, "statuscode"),
+                    value(item, "digest"),
+                    value(item, "length"),
+                )
+            )
+    return CDXRows(rows, resume_key)
+
+
+def parse_cdx_text_rows(
+    data: bytes | bytearray,
+    endpoint: str = "",
+    params: list[tuple[str, str]] | None = None,
+) -> CDXRows:
+    """Parse line-oriented CDX output in one pass with bounded duplication.
+
+    A normal 200 response with no rows is a valid empty result. This matters for
+    sparse sites and date windows; treating it as a broken connection caused some
+    projects to keep subdividing and retrying work that was already complete.
+    """
+    if not data:
+        return CDXRows([])
+    prefix = bytes(data[:1000]).lstrip(b"\xef\xbb\xbf").lower()
+    if any(marker in prefix for marker in (b"<!doctype", b"<html", b"bad gateway", b"temporarily unavailable", b"too many requests")):
+        preview = clean_space(bytes(data[:320]).decode("utf-8", "replace"))
+        raise MalformedCDXResponse(
+            f"CDX plain-text response returned an error page from {endpoint}: {preview}",
+            splittable=True,
+            endpoint=endpoint,
+        )
+    params = params or []
+    if any(key.casefold() == "shownumpages" and value.casefold() == "true" for key, value in params):
+        for raw_line in _iter_binary_lines(data):
+            token = raw_line.strip().lstrip(b"\xef\xbb\xbf")
+            if not token:
+                continue
+            if token.isdigit():
+                return CDXRows([(token.decode("ascii"), "", "", "", "", "")])
+            break
+        raise MalformedCDXResponse(
+            f"CDX page-count fallback was not numeric at {endpoint}: {clean_space(bytes(data[:320]).decode('utf-8', 'replace'))}",
+            splittable=True,
+            endpoint=endpoint,
+        )
+
+    rows: list[CDXRow] = []
+    malformed_count = 0
+    malformed_preview = ""
+    after_blank = False
+    resume_candidate: bytes | None = None
+    first_nonempty = True
+    for raw_line in _iter_binary_lines(data):
+        line = raw_line.strip()
+        if first_nonempty:
+            line = line.lstrip(b"\xef\xbb\xbf")
+        if not line:
+            after_blank = True
+            continue
+        first_nonempty = False
+        if resume_candidate is not None:
+            malformed_count += 1
+            if not malformed_preview:
+                malformed_preview = _decode_field(resume_candidate)[:320]
+            resume_candidate = None
+        parts = line.split(None, 5)
+        if after_blank and len(parts) == 1:
+            resume_candidate = parts[0]
+            after_blank = False
+            continue
+        after_blank = False
+        if len(parts) == 6 and parts[0].lower() == b"timestamp":
+            continue
+        if len(parts) != 6 or not parts[0].isdigit():
+            malformed_count += 1
+            if not malformed_preview:
+                malformed_preview = _decode_field(line)[:320]
+            continue
+        timestamp, mimetype, statuscode, digest, length, original = parts
+        rows.append(
+            (
+                _decode_field(timestamp),
+                _decode_field(original),
+                _decode_field(mimetype),
+                _decode_field(statuscode),
+                _decode_field(digest),
+                _decode_field(length),
+            )
+        )
+    if malformed_count:
+        raise MalformedCDXResponse(
+            f"CDX plain-text response contained {malformed_count} malformed row(s) at {endpoint}: "
+            f"{clean_space(malformed_preview)}",
+            splittable=True,
+            endpoint=endpoint,
+        )
+    resume_key = _decode_field(resume_candidate) if resume_candidate else None
+    return CDXRows(rows, resume_key)
 
 
 def cdx_text_fallback_params(params: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -398,11 +745,14 @@ def parse_cdx_text_response(
 ) -> object:
     raw = data.decode("utf-8", "replace").lstrip("\ufeff").replace("\x00", "").strip()
     if not raw:
-        raise MalformedCDXResponse(
-            f"CDX plain-text fallback returned an empty body from {endpoint}",
-            splittable=True,
-            endpoint=endpoint,
-        )
+        params = params or []
+        if any(key.casefold() == "shownumpages" and value.casefold() == "true" for key, value in params):
+            raise MalformedCDXResponse(
+                f"CDX page-count fallback returned an empty body from {endpoint}",
+                splittable=True,
+                endpoint=endpoint,
+            )
+        return [["timestamp", "mimetype", "statuscode", "digest", "length", "original"]]
     lowered = raw[:1000].casefold()
     if any(marker in lowered for marker in ("<!doctype", "<html", "bad gateway", "temporarily unavailable", "too many requests")):
         raise MalformedCDXResponse(

@@ -129,6 +129,7 @@ class ArchiveScoutApp(tk.Tk):
         self.result_page = 0
         self.result_page_size = 500
         self.dashboard_refresh_job: str | None = None
+        self.log_line_count = 0
         self.create_variables()
         self.resolved_theme, self.colors = apply_theme(self, self.theme_var.get(), float(self.font_scale_var.get()))
         self.create_ui()
@@ -1179,9 +1180,11 @@ class ArchiveScoutApp(tk.Tk):
         self.stop_button.configure(state="disabled")
 
     def process_events(self) -> None:
+        processed = 0
         try:
-            while True:
+            while processed < 500:
                 kind, payload = self.events.get_nowait()
+                processed += 1
                 if kind == "progress":
                     event = payload
                     self.status_var.set(event.message)
@@ -1226,7 +1229,10 @@ class ArchiveScoutApp(tk.Tk):
                     messagebox.showerror(APP_NAME, str(payload))
         except queue.Empty:
             pass
-        self.after(100, self.process_events)
+        # A very large archive can emit progress faster than Tk can paint.
+        # Drain bursts promptly while still yielding to the event loop so the
+        # window remains responsive instead of accumulating an unbounded queue.
+        self.after(10 if processed >= 500 else 100, self.process_events)
 
     def finish_run(self) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
@@ -1241,6 +1247,10 @@ class ArchiveScoutApp(tk.Tk):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.configure(state="normal")
         self.log_text.insert("end", f"[{timestamp}] {message}\n")
+        self.log_line_count += 1
+        if self.log_line_count > 5000:
+            self.log_text.delete("1.0", "501.0")
+            self.log_line_count -= 500
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
